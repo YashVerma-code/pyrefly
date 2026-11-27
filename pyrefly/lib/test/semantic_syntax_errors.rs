@@ -5,6 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use pyrefly_python::sys_info::PythonVersion;
+
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 // LateFutureImport: `from __future__ import` statements must appear at the beginning of the file,
@@ -227,5 +230,113 @@ testcase!(
     test_multiple_starred_expressions,
     r#"
 x, *y, *z = [1, 2, 3, 4]
+"#,
+);
+
+// PEP 810: `lazy` imports are only allowed at module level, outside `try` statements.
+testcase!(
+    test_lazy_import_invalid_placement,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+import contextlib
+lazy import json
+with contextlib.nullcontext():
+    lazy from os import path
+lazy from os import *  # E: lazy from ... import * is not allowed
+lazy from __future__ import annotations  # E: lazy from __future__ import is not allowed
+def f():
+    lazy import json  # E: lazy import not allowed inside functions
+class C:
+    lazy import json  # E: lazy import not allowed inside classes
+    def g(self):
+        lazy from os import path  # E: lazy from ... import not allowed inside functions
+try:
+    lazy import json  # E: lazy import not allowed inside try/except blocks
+except ImportError:
+    pass
+"#,
+);
+
+// Every clause of a `try` statement counts, and the count drops after the statement.
+testcase!(
+    test_lazy_import_try_clauses,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+try:
+    try:
+        pass
+    finally:
+        pass
+    lazy import json  # E: lazy import not allowed inside try/except blocks
+except ImportError:
+    lazy import os  # E: lazy import not allowed inside try/except blocks
+else:
+    lazy import sys  # E: lazy import not allowed inside try/except blocks
+finally:
+    lazy import re  # E: lazy import not allowed inside try/except blocks
+try:
+    pass
+except* ImportError:
+    lazy from os import path  # E: lazy from ... import not allowed inside try/except blocks
+lazy import math
+if True:
+    lazy import string
+"#,
+);
+
+// As in CPython, a `try` statement in the current scope comes first, and the innermost scope
+// decides between functions and classes.
+testcase!(
+    test_lazy_import_context_precedence,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+def outer():
+    try:
+        lazy import json  # E: lazy import not allowed inside try/except blocks
+    except ImportError:
+        pass
+    class Inner:
+        lazy import os  # E: lazy import not allowed inside classes
+class C:
+    try:
+        lazy import sys  # E: lazy import not allowed inside try/except blocks
+    except ImportError:
+        pass
+try:
+    async def f():
+        lazy from json import loads  # E: lazy from ... import not allowed inside functions
+    class D:
+        lazy import re  # E: lazy import not allowed inside classes
+except ImportError:
+    pass
+"#,
+);
+
+testcase!(
+    test_lazy_import_star_outside_module_scope,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+def f():
+    lazy from os import *  # E: lazy from ... import not allowed inside functions
+class C:
+    lazy from os import *  # E: lazy from ... import not allowed inside classes
+"#,
+);
+
+testcase!(
+    test_lazy_import_invalid_placement_before_py315,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+lazy from os import *  # E: Cannot use `lazy` import statement on Python 3.14
+lazy from __future__ import annotations  # E: Cannot use `lazy` import statement on Python 3.14
+def f():
+    lazy import json  # E: Cannot use `lazy` import statement on Python 3.14
+    lazy from os import *  # E: Cannot use `lazy` import statement on Python 3.14
+class C:
+    lazy import json  # E: Cannot use `lazy` import statement on Python 3.14
+try:
+    lazy import json  # E: Cannot use `lazy` import statement on Python 3.14
+except ImportError:
+    pass
 "#,
 );

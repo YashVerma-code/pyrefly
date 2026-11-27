@@ -5,7 +5,198 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
+
+// Reading an unbound function must retain the relationship between its receiver and Self.
+testcase!(
+    test_copied_self_unbound_method,
+    r#"
+from typing import Callable, ClassVar, Self, assert_type
+
+class Base:
+    value: ClassVar[Self]
+    def identity(self) -> Self:
+        return self
+    def plain(self) -> "Base":
+        return self
+    @classmethod
+    def factory(cls) -> Self:
+        return cls()
+    @staticmethod
+    def static(value: "Base") -> "Base":
+        return value
+
+class Child(Base):
+    identity = Base.identity
+    plain = Base.plain
+
+saved = Base.identity
+assert_type(saved(Child()), Child)
+assert_type(Base.identity(Child()), Child)
+assert_type(Child().identity(), Child)
+assert_type(Child().plain(), Base)
+assert_type(Child.factory(), Child)
+assert_type(Child.static(Child()), Base)
+assert_type(Base.value, Base)
+assert_type(Child.value, Child)
+
+precise: Callable[[Child], Child] = Base.identity
+invalid: Callable[[Base], Child] = Base.identity  # E: not assignable
+
+class Unrelated:
+    identity = Base.identity
+
+Unrelated().identity()  # E: not assignable
+"#,
+);
+
+testcase!(
+    bug = "Copied generic methods lose the derived Self return type",
+    test_copied_self_generic_method,
+    r#"
+from typing import Self, assert_type
+
+class Box[T]:
+    def identity(self) -> Self:
+        return self
+    def take(self, value: T) -> T:
+        return value
+
+class IntBox(Box[int]):
+    identity = Box.identity  # E: inconsistent
+    take = Box.take
+
+assert_type(Box.identity(IntBox()), Box[int])
+assert_type(IntBox().identity(), Box[int])
+assert_type(IntBox().take(1), int)
+IntBox().take("wrong")  # E: not assignable
+
+class Specialized(Box[int]):
+    identity = Box[int].identity  # E: inconsistent
+
+assert_type(Specialized().identity(), Box[int])
+assert_type(Box[int].identity(Specialized()), Box[int])
+"#,
+);
+
+testcase!(
+    test_copied_self_concrete_receiver_bound,
+    r#"
+from typing import Callable, Self, assert_type, cast
+
+class Base:
+    def identity(self: "Base") -> Self:
+        return cast(Self, self)
+
+class Child(Base): ...
+
+invalid: Callable[[Base], Child] = Base.identity  # E: not assignable
+assert_type(Base.identity(Base()), Base)
+assert_type(Child().identity(), Child)
+"#,
+);
+
+testcase!(
+    test_copied_self_bound_class_controls,
+    r#"
+from typing import Self, assert_type
+
+class Base:
+    def identity(self) -> Self:
+        return self
+    def tag[T](self, value: T) -> tuple[Self, T]:
+        return self, value
+
+class Child(Base): ...
+
+def check(cls: type[Base]) -> None:
+    assert_type(cls.identity(Child()), Child)
+
+assert_type(Base.tag(Child(), 1), tuple[Child, int])
+
+class Box[T]:
+    def identity(self) -> Self:
+        return self
+    def take(self, value: T) -> T:
+        return value
+
+class Concrete(Box[int]): ...
+class Descendant(Concrete): ...
+
+assert_type(Concrete.identity(Concrete()), Concrete)
+assert_type(Concrete.identity(Descendant()), Descendant)
+assert_type(Concrete.take(Concrete(), 1), int)
+"#,
+);
+
+// Implicit unknown receivers retain the nominal contract; explicit Any remains gradual.
+testcase!(
+    test_copied_self_unknown_receiver,
+    TestEnv::new().enable_unused_call_result_error(),
+    r#"
+from typing import Any, Self, assert_type, overload
+
+class Missing: ...
+
+class Timestamp:
+    @overload
+    def round(self, unit: str) -> Self | Missing: ...
+    @overload
+    def round(self, unit: int) -> Self | Missing: ...
+    def round(self, unit: str | int) -> Self | Missing:
+        return self
+
+class Duration:
+    def round(self) -> Self:
+        return self
+
+class Precise(Duration): ...
+
+def check(ts, duration) -> None:
+    assert_type(Timestamp.round(ts, "s"), Timestamp | Missing)
+    assert_type(Duration.round(duration), Duration)
+    Duration.round(duration)  # E: not used
+
+def explicit(ts: Any, duration: Any) -> None:
+    assert_type(Timestamp.round(ts, "s"), Any | Missing)
+    assert_type(Duration.round(duration), Any)
+
+assert_type(Duration.round(Precise()), Precise)
+
+def identity[T](value: T) -> T:
+    return value
+
+def ordinary(value) -> None:
+    assert_type(identity(value), Any)
+"#,
+);
+
+testcase!(
+    test_copied_self_mixed_receiver_evidence,
+    r#"
+from typing import Any, Self, assert_type
+
+class Base:
+    def choose(self, other: Self) -> Self:
+        return self
+
+class Child(Base): ...
+
+def check(unknown, child: Child) -> None:
+    assert_type(Base.choose(child, unknown), Child)
+    assert_type(Base.choose(unknown, child), Child)
+    expected: Child = Base.choose(unknown, unknown)
+    assert_type(expected, Child)
+
+class Widget:
+    def __new__(cls) -> Self:
+        return super().__new__(cls)
+
+def constructor(cls) -> None:
+    assert_type(Widget.__new__(cls), Any)
+"#,
+);
 
 testcase!(
     test_use_self,
@@ -440,7 +631,7 @@ testcase!(
     r#"
 class C:
     @classmethod
-    def create(cls) -> C:
+    def create(cls) -> "C":
         return cls.__new__(C)  # E: Argument `type[C]` is not assignable to parameter `cls` with type `type[Self@C]` in function `object.__new__`
 "#,
 );
@@ -450,7 +641,7 @@ testcase!(
     test_self_in_container_pinning,
     r#"
 class C:
-    def foo(self, other: C) -> list:
+    def foo(self, other: "C") -> list:
         xs = [self]
         xs.append(other)  # E: Argument `C` is not assignable to parameter `object` with type `Self@C` in function `list.append`
         return xs
@@ -493,7 +684,7 @@ def deco(fn: _Fn) -> _Fn:
 
 class Parent:
     @deco
-    def merge(self, other: Parent) -> Self:
+    def merge(self, other: "Parent") -> Self:
         return self
 
 class Child(Parent):
@@ -541,7 +732,7 @@ testcase!(
     r#"
 from typing import Callable
 
-def concrete_deco(fn: Callable[[MyClass, int], str]) -> Callable[[MyClass, int], str]:
+def concrete_deco(fn: "Callable[[MyClass, int], str]") -> "Callable[[MyClass, int], str]":
     return fn
 
 class MyClass:
@@ -579,7 +770,7 @@ testcase!(
     r#"
 from typing import Callable, assert_type
 
-def generic_deco[T](fn: Callable[[MyClass, int], T]) -> Callable[[MyClass, int], T]:
+def generic_deco[T](fn: "Callable[[MyClass, int], T]") -> "Callable[[MyClass, int], T]":
     return fn
 
 class MyClass:
@@ -599,10 +790,10 @@ testcase!(
     r#"
 from typing import Callable, assert_type, overload
 
-def concrete_int(fn: Callable[[MyClass, int], int]) -> Callable[[MyClass, int], int]:
+def concrete_int(fn: "Callable[[MyClass, int], int]") -> "Callable[[MyClass, int], int]":
     return fn
 
-def concrete_str(fn: Callable[[MyClass, str], str]) -> Callable[[MyClass, str], str]:
+def concrete_str(fn: "Callable[[MyClass, str], str]") -> "Callable[[MyClass, str], str]":
     return fn
 
 class MyClass:
@@ -757,9 +948,9 @@ from typing import Self, overload
 
 class C:
     @overload
-    def clone(self, x: int) -> C: ... # E: Overload return type `C` is not assignable to implementation return type `Self@C`
+    def clone(self, x: int) -> "C": ... # E: Overload return type `C` is not assignable to implementation return type `Self@C`
     @overload
-    def clone(self, x: str) -> C: ... # E: Overload return type `C` is not assignable to implementation return type `Self@C`
+    def clone(self, x: str) -> "C": ... # E: Overload return type `C` is not assignable to implementation return type `Self@C`
     def clone(self, x) -> Self: ...
     "#,
 );
@@ -772,7 +963,7 @@ class D:
     def __init__(self: A): pass  # E: `__init__` method self type `A` is not a superclass of class `D`
     def f(self: A): pass  # E: `f` method self type `A` is not a superclass of class `D`
     def g(self: type[A]): pass  # E: `g` method self type `type[A]` refers to class `A`, which is not a superclass of class `D`
-    def h(self: D): pass # Ok
+    def h(self: "D"): pass # Ok
     "#,
 );
 
@@ -780,7 +971,7 @@ testcase!(
     test_method_type_of_defining_class_self,
     r#"
 class D:
-    def f(self: type[D]): pass # No error: type[D] where D is the defining class
+    def f(self: "type[D]"): pass # No error: type[D] where D is the defining class
     "#,
 );
 
@@ -809,7 +1000,7 @@ class D:
     @classmethod
     def g(cls: type[A]): pass  # E: `g` method cls type `type[A]` refers to class `A`, which is not a superclass of class `D`
     @classmethod
-    def h(cls: type[D]): pass # Ok
+    def h(cls: "type[D]"): pass # Ok
 "#,
 );
 
@@ -820,7 +1011,7 @@ testcase!(
 # the diagnostic names the class `Child` that the superclass check compares with `Base`.
 class Base:
     @classmethod
-    def method(cls: type[Child]) -> None:  # E: `method` method cls type `type[Child]` refers to class `Child`, which is not a superclass of class `Base`
+    def method(cls: "type[Child]") -> None:  # E: `method` method cls type `type[Child]` refers to class `Child`, which is not a superclass of class `Base`
         pass
 
 class Child(Base):

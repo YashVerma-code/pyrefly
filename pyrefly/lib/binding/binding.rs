@@ -2418,6 +2418,8 @@ pub struct AttrsSpecifier {
 #[derive(Clone, Debug)]
 pub struct NameAssign {
     pub name: Name,
+    /// The assignment target, which can be on a different line from the value.
+    pub name_range: TextRange,
     pub annotation: Option<(AnnotationStyle, Idx<KeyAnnotation>)>,
     pub expr: Box<Expr>,
     pub legacy_tparams: Option<Box<[Idx<KeyLegacyTypeParam>]>>,
@@ -2883,6 +2885,8 @@ pub enum Binding {
     /// Resolves to `Never` when control cannot leave the suite normally: either its test makes
     /// it dead, or its `last` termination key is `Never`. Resolves to `None` otherwise.
     BranchEnd(Box<BranchEnd>),
+    /// Whether the module mutates a `functools` wrapper, solved as a `bool` literal.
+    FunctoolsWrapperMutation(bool),
     Sentinel(
         Box<(
             Option<Idx<KeyAnnotation>>,
@@ -2938,6 +2942,7 @@ impl DisplayWith<Bindings> for Binding {
                 let (a, name, _, call) = x.as_ref();
                 write!(f, "sentinel({}, {name}, {})", ann(a), m.display(call))
             }
+            Self::FunctoolsWrapperMutation(b) => write!(f, "FunctoolsWrapperMutation({b})"),
             Self::ReturnExplicit(x) => {
                 write!(f, "ReturnExplicit({}, ", ann(&x.annot))?;
                 match &x.expr {
@@ -3350,7 +3355,8 @@ impl Binding {
             | Binding::ExceptionClass(_, _)
             | Binding::SuppressedException(_)
             | Binding::BranchTest(_)
-            | Binding::BranchEnd(_) => None,
+            | Binding::BranchEnd(_)
+            | Binding::FunctoolsWrapperMutation(_) => None,
         }
     }
 }
@@ -4067,7 +4073,11 @@ impl BindingLegacyTypeParam {
 
 #[derive(Clone, Debug)]
 pub enum BindingYield {
-    Yield(Option<Idx<KeyAnnotation>>, ExprYield),
+    Yield {
+        annot: Option<Idx<KeyAnnotation>>,
+        infer_send: bool,
+        expr: ExprYield,
+    },
     Invalid(ExprYield),
     Unreachable(ExprYield),
 }
@@ -4075,7 +4085,7 @@ pub enum BindingYield {
 impl BindingYield {
     fn expr(&self) -> &ExprYield {
         match self {
-            Self::Yield(_, x) => x,
+            Self::Yield { expr, .. } => expr,
             Self::Invalid(x) => x,
             Self::Unreachable(x) => x,
         }

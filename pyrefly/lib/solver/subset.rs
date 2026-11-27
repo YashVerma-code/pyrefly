@@ -73,6 +73,7 @@ use crate::types::callable::PrefixParam;
 use crate::types::callable::Required;
 use crate::types::callable::params_are_gradual_variadic;
 use crate::types::class::ClassType;
+use crate::types::function::PropertyRole;
 use crate::types::quantified::QuantifiedKind;
 use crate::types::tuple::Tuple;
 use crate::types::type_alias::TypeAliasData;
@@ -397,12 +398,17 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 ) => {
                     l_arg = l_args.next();
                 }
-                (Some(Param::KwOnly(_, _, Required::Optional(_)) | Param::Kwargs(_, _)), None) => {
-                    if u_param_matched_with_l_varargs.is_empty() {
+                // Keep a retained TypedDict's explicit overlays for keyword matching.
+                // The schema may require a field that partial binding made optional.
+                (Some(Param::Kwargs(_, ty)), None) if ty.unpacked_typed_dict().is_some() => {
+                    break;
+                }
+                (Some(Param::KwOnly(_, _, Required::Optional(_)) | Param::Kwargs(..)), None) => {
+                    if u_param_matched_with_l_varargs.is_empty()
+                        && !matches!(l_params.last(), Some(Param::Kwargs(_, ty)) if ty.unpacked_typed_dict().is_some())
+                    {
                         l_arg = l_args.next();
                     } else {
-                        // Don't consume kw-only and kwarg params from `l` yet, we need them to
-                        // check that the matched params from `u` can be called by name
                         break;
                     }
                 }
@@ -590,7 +596,8 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 _ => return Err(lists.error_at(l_arg, u_arg, SubsetError::Other)),
             }
         }
-        // We can use a HashMap for `l_keywords` since the order does not matter
+        // `l_keywords` is a `HashMap` because entries are removed one at a time as they are
+        // matched, and a TypedDict may expand into thousands of keyword parameters.
         let mut l_keywords = HashMap::new();
         let mut l_kwargs_param = None;
         for arg in Option::into_iter(l_arg).chain(l_args) {
@@ -619,82 +626,72 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 _ => (),
             }
         }
-        let object_type = self
-            .solver
-            .heap
-            .mk_class_type(self.type_order.stdlib().object().clone());
-        // Expand typed dict kwargs if necessary, check regular kwargs
         // `UnpackKind::Kwargs` is produced only for a `**kwargs: Unpack[TD]` annotation, and
         // `validate_type_form` has already rejected any inner type that is not a TypedDict, so
         // these arms do not need to consult class metadata to recognize one.
-        // Keyword parameters expanded from a TypedDict are attributed to its `**kwargs`.
-        let l_kwargs = match (l_kwargs_param, u_kwargs_param) {
+        // `l_kwargs` and `u_kwargs` are the types of the extra keyword arguments that each side
+        // accepts, or `None` if it accepts none.
+        let (l_kwargs, u_kwargs) = match (l_kwargs_param, u_kwargs_param) {
             (
                 Some(Param::Kwargs(_, l @ Type::Var(_))),
                 Some(Param::Kwargs(_, u @ Type::Unpack(_, UnpackKind::Kwargs))),
             ) if l_keywords.is_empty() => {
                 self.is_subset_eq(u, l)
                     .map_err(|e| lists.error_at(l_kwargs_param, u_kwargs_param, e))?;
-                Some(object_type)
+                let object_type = self
+                    .solver
+                    .heap
+                    .mk_class_type(self.type_order.stdlib().object().clone());
+                (Some(object_type), None)
             }
-            (
-                Some(l_param @ Param::Kwargs(_, Type::Unpack(l_inner, UnpackKind::Kwargs))),
-                Some(u_param @ Param::Kwargs(_, Type::Unpack(u_inner, UnpackKind::Kwargs))),
-            ) if let (Type::ClassType(l_typed_dict), Type::ClassType(u_typed_dict)) =
-                (&**l_inner, &**u_inner) =>
-            {
-                for (name, ty, required) in self.type_order.typed_dict_kw_param_info(l_typed_dict) {
-                    l_keywords.insert(name, (ty, required == Required::Required, l_param));
-                }
-                for (name, ty, required) in self.type_order.typed_dict_kw_param_info(u_typed_dict) {
-                    u_keywords.insert(name, (ty, required == Required::Required, u_param));
-                }
-                Some(object_type)
+            _ => {
+                // Keyword parameters expanded from a TypedDict are attributed to its `**kwargs`.
+                let l_kwargs = l_kwargs_param.and_then(|l_param| {
+                    let (keywords, extra) = self.split_kwargs(l_param.as_type());
+                    for (name, ty, required) in keywords {
+                        l_keywords.entry(name).or_insert((
+                            ty,
+                            required == Required::Required,
+                            l_param,
+                        ));
+                    }
+                    extra
+                });
+                let u_kwargs = u_kwargs_param.and_then(|u_param| {
+                    let (keywords, extra) = self.split_kwargs(u_param.as_type());
+                    for (name, ty, required) in keywords {
+                        u_keywords.entry(name).or_insert((
+                            ty,
+                            required == Required::Required,
+                            u_param,
+                        ));
+                    }
+                    extra
+                });
+                (l_kwargs, u_kwargs)
             }
-            (Some(l_param @ Param::Kwargs(_, Type::Unpack(l_inner, UnpackKind::Kwargs))), _)
-                if let Type::ClassType(l_typed_dict) = &**l_inner =>
-            {
-                for (name, ty, required) in self.type_order.typed_dict_kw_param_info(l_typed_dict) {
-                    l_keywords.insert(name, (ty, required == Required::Required, l_param));
-                }
-                Some(object_type)
-            }
-            (
-                l_kwargs_param,
-                Some(u_param @ Param::Kwargs(_, Type::Unpack(u_inner, UnpackKind::Kwargs))),
-            ) if let Type::ClassType(u_typed_dict) = &**u_inner => {
-                // Allow expanding Unpack[TypedDict] kwargs against explicit keyword params
-                // only when the other side also has **kwargs or the TypedDict is closed.
-                if l_kwargs_param.is_none()
-                    && !matches!(
-                        self.type_order.typed_dict_extra_items(u_typed_dict),
-                        ExtraItems::Closed
-                    )
-                {
-                    return Err(lists.error_at(
-                        None,
-                        Some(u_param),
-                        SubsetError::OpenTypedDictKwargs(
-                            u_typed_dict.name(&self.type_order).clone(),
-                        ),
-                    ));
-                }
-                for (name, ty, required) in self.type_order.typed_dict_kw_param_info(u_typed_dict) {
-                    u_keywords.insert(name, (ty, required == Required::Required, u_param));
-                }
-                l_kwargs_param.map(|l_param| l_param.as_type().clone())
-            }
-            (Some(l_param), Some(u_param)) => {
-                self.is_subset_eq(u_param.as_type(), l_param.as_type())
-                    .map_err(|e| lists.error_at(l_kwargs_param, u_kwargs_param, e))?;
-                Some(l_param.as_type().clone())
-            }
+        };
+        match (&l_kwargs, &u_kwargs) {
+            (Some(l_ty), Some(u_ty)) => self
+                .is_subset_eq(u_ty, l_ty)
+                .map_err(|e| lists.error_at(l_kwargs_param, u_kwargs_param, e))?,
             // The gradual `**kwargs` of `u` stands for any remaining keyword parameters of `l`.
             (None, Some(_)) if !u_gradual => {
-                return Err(lists.error_at(None, u_kwargs_param, SubsetError::Other));
+                let error = match u_kwargs_param {
+                    Some(Param::Kwargs(_, Type::Unpack(u_inner, UnpackKind::Kwargs)))
+                        if l_kwargs_param.is_none()
+                            && let Type::ClassType(u_typed_dict) = &**u_inner =>
+                    {
+                        SubsetError::OpenTypedDictKwargs(
+                            u_typed_dict.name(&self.type_order).clone(),
+                        )
+                    }
+                    _ => SubsetError::Other,
+                };
+                return Err(lists.error_at(l_kwargs_param, u_kwargs_param, error));
             }
-            (l_kwargs_param, _) => l_kwargs_param.map(|l_param| l_param.as_type().clone()),
-        };
+            _ => {}
+        }
         // These parameters from `u` may be passed by name or position. We matched the positional
         // case with *args from `l` already; now we check that they can be passed by name.
         for (name, u_ty, u_param) in u_param_matched_with_l_varargs {
@@ -738,7 +735,34 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         {
             return Err(error);
         }
+        // `u` may pass an extra keyword argument to any keyword parameter of `l` that it does not
+        // declare itself. Sorting by name keeps the reported error independent of `HashMap`
+        // iteration order.
+        if let Some(u_ty) = &u_kwargs {
+            for (_, (l_ty, _, l_param)) in l_keywords.iter().sorted_by_key(|(name, _)| *name) {
+                self.is_subset_eq(u_ty, l_ty)
+                    .map_err(|e| lists.error_at(Some(l_param), u_kwargs_param, e))?;
+            }
+        }
         Ok(())
+    }
+
+    /// Splits the type of a `**kwargs` parameter into the keyword parameters expanded from an
+    /// `Unpack[TypedDict]` annotation and the type of the remaining keyword arguments it accepts,
+    /// which is `None` for a closed TypedDict.
+    fn split_kwargs(&self, kwargs: &Type) -> (Vec<(Name, Type, Required)>, Option<Type>) {
+        match kwargs {
+            Type::Unpack(inner, UnpackKind::Kwargs)
+                if let Type::ClassType(typed_dict) = &**inner =>
+            {
+                let extra = match self.type_order.typed_dict_extra_items(typed_dict) {
+                    ExtraItems::Closed => None,
+                    extra => Some(extra.extra_item(self.type_order.stdlib()).ty),
+                };
+                (self.type_order.typed_dict_kw_param_info(typed_dict), extra)
+            }
+            _ => (Vec::new(), Some(kwargs.clone())),
+        }
     }
 
     /// `l_gradual` and `u_gradual` say whether `l_params` and `u_params` have a gradual tail; see
@@ -2383,6 +2407,15 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             ),
             (Type::Module(_), Type::ClassType(cls)) if cls.is(KnownClass::TypesModuleType) => {
                 Ok(())
+            }
+            // Property accessors retain function signatures internally, but class-side values
+            // are instances of the nominal descriptor class.
+            (_, Type::ClassType(_))
+                if let Some(metadata) = got.property_metadata()
+                    && matches!(metadata.role, PropertyRole::Getter | PropertyRole::Setter)
+                    && let Some(cls) = metadata.descriptor_class.as_deref() =>
+            {
+                self.is_subset_eq(&Type::ClassType(cls.clone()), want)
             }
             (_, Type::ClassType(cls))
                 if cls.is(KnownClass::TypesFunctionType)

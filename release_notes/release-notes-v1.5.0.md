@@ -76,6 +76,7 @@ These may surface new output or errors in code that checked cleanly under v1.4.1
 - `reveal_type` output is shown under the `basic` preset, which applies when there is no config file.
 - A `required-version` mismatch exits with code 4 instead of 1, so it can be told apart from type errors. When several files are given, Pyrefly now stops before checking them instead of reporting errors from the wrong version.
 - When `pyrefly init` finds a BasedPyright baseline, it offers to create a Pyrefly baseline, so a migrated project starts with a clean check.
+- The experimental `--report-scip` flag writes a [SCIP](https://github.com/scip-code/scip) code-navigation index with definitions, references, hover documentation, and implementation relationships. It uses the same symbol format as Sourcegraph's [scip-python](https://github.com/sourcegraph/scip-python), and its output is close to scip-python's. See [Indexing](https://pyrefly.org/en/docs/scip/).
 
 ### Performance
 

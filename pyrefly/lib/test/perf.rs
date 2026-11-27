@@ -13,7 +13,7 @@ use crate::testcase;
 #[test]
 fn test_builtin_getattr_nested_arguments() -> anyhow::Result<()> {
     let mut code = String::from(
-        "from typing import Any, assert_type\nclass C:\n    child: C\ndef test(c: C) -> None:\n",
+        "from typing import Any, assert_type\nclass C:\n    child: \"C\"\ndef test(c: C) -> None:\n",
     );
     let mut contextual = String::new();
     for (name, expected) in [("child", "C"), ("missing", "Any")] {

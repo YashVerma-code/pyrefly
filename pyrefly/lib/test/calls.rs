@@ -364,12 +364,12 @@ class B[T](A): ...
 class C[T]: ...
 assert_type(A.__new__(A), A)
 assert_type(A.__new__(B[int]), B[int])
-assert_type(A.__new__(C[int]), C[int]) # E: `C[int]` is not assignable to upper bound `A` of type variable `Self@A`
+assert_type(A.__new__(C[int]), C[int]) # E: While checking parameter `cls`: `C[int]` is not assignable to upper bound `A` of type variable `Self@A`
 
 o = A()
 assert_type(o.__new__(A), A)
 assert_type(o.__new__(B[int]), B[int])
-assert_type(o.__new__(C[int]), C[int]) # E: `C[int]` is not assignable to upper bound `A` of type variable `Self@A`
+assert_type(o.__new__(C[int]), C[int]) # E: While checking parameter `cls`: `C[int]` is not assignable to upper bound `A` of type variable `Self@A`
     "#,
 );
 
@@ -397,7 +397,7 @@ from typing import assert_type, Self
 class A[T]:
     def __new__(cls: type[Self], x: T) -> Self: ...
 # A[int] is a generic alias, which doesn't resolve to custom __new__
-o = A[int].__new__(A[str], "foo") # E: Missing positional argument `args` in function `types.GenericAlias.__new__` # E: `A[str]` is not assignable to upper bound `GenericAlias` of type variable `Self@GenericAlias` # E: Argument `Literal['foo']` is not assignable to parameter `origin` with type `type[Any]` in function `types.GenericAlias.__new__`
+o = A[int].__new__(A[str], "foo") # E: Missing positional argument `args` in function `types.GenericAlias.__new__` # E: While checking parameter `cls`: `A[str]` is not assignable to upper bound `GenericAlias` of type variable `Self@GenericAlias` # E: Argument `Literal['foo']` is not assignable to parameter `origin` with type `type[Any]` in function `types.GenericAlias.__new__`
     "#,
 );
 
@@ -418,6 +418,35 @@ fn test_env_3_12() -> TestEnv {
         micro: 0,
     })
 }
+
+// https://github.com/pyrefly-org/pyrefly/issues/5724
+testcase!(
+    test_deprecated_callable_instance_decorator,
+    r#"
+from collections.abc import Callable
+from typing import assert_type
+from warnings import deprecated
+
+class Wrapper[T]:
+    def __call__(self, *args: object, **kwargs: object) -> T: ...
+    def wrapped(self) -> T: ...
+
+def wrap[**P, T](fn: Callable[P, T]) -> Wrapper[T]: ...
+
+@wrap
+@deprecated("Use another function")
+def old_function() -> None: ...
+
+assert_type(old_function, Wrapper[None])  # E: `old_function` is deprecated
+assert_type(old_function(1), None)  # E: `old_function` is deprecated
+assert_type(old_function.wrapped(), None)  # E: `old_function` is deprecated
+
+@wrap
+def current_function() -> None: ...
+
+assert_type(current_function(1), None)
+    "#,
+);
 
 testcase!(
     test_deprecated_union_decorator,
@@ -1172,9 +1201,9 @@ from warnings import deprecated
 class C[T]:
     @deprecated("DEPRECATED")
     @overload
-    def f(self: C[int], x: int) -> int: ...
+    def f(self: "C[int]", x: int) -> int: ...
     @overload
-    def f(self: C[str], x: str) -> str: ...
+    def f(self: "C[str]", x: str) -> str: ...
     def f(self, x: int | str) -> int | str:
         return x
 
@@ -1343,7 +1372,7 @@ class A[T]:
     def __new__(cls: type[Self], x: T) -> Self: ...
 
 # A[int] is a generic alias, which doesn't resolve to custom __new__
-o = A[int].__new__(A[int], 42) # E: Missing positional argument `args` in function `types.GenericAlias.__new__` # E: `A[int]` is not assignable to upper bound `GenericAlias` of type variable `Self@GenericAlias` # E: Argument `Literal[42]` is not assignable to parameter `origin` with type `type[Any]` in function `types.GenericAlias.__new__`
+o = A[int].__new__(A[int], 42) # E: Missing positional argument `args` in function `types.GenericAlias.__new__` # E: While checking parameter `cls`: `A[int]` is not assignable to upper bound `GenericAlias` of type variable `Self@GenericAlias` # E: Argument `Literal[42]` is not assignable to parameter `origin` with type `type[Any]` in function `types.GenericAlias.__new__`
 assert_type(o, A[int])
 
 # Receiver type binding is preserved

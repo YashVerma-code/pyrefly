@@ -127,8 +127,7 @@ pub(crate) fn move_symbol_to_new_file_code_action(
         &new_path,
         config.search_path().chain(
             config
-                .fallback_search_path
-                .for_directory(new_path.parent())
+                .fallback_search_path_for_directory(new_path.parent())
                 .iter(),
         ),
         &config.extra_file_extensions,

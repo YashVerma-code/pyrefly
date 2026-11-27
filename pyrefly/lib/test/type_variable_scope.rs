@@ -175,7 +175,7 @@ from typing import Any
 def decorate(f) -> Any: ...
 class A[T]:
     @decorate
-    def __init__(self: A[T]): ...  # E: self type cannot reference class type parameter `T`
+    def __init__(self: "A[T]"): ...  # E: self type cannot reference class type parameter `T`
     "#,
 );
 
@@ -302,7 +302,7 @@ testcase!(
     bug = "We model tparam intercepts in static scope, which shadows parents and can lead to edge case bugs involving mutable captures",
     test_shadowing_interaction_with_mutable_capture,
     r#"
-def f(x: A):
+def f(x: A):  # E: `A` is uninitialized
     nonlocal A  # Should error, but it finds the annotation scope with a fake entry for `A` as a potential tparam.
 
 class A:

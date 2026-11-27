@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
@@ -19,7 +20,7 @@ f = yielding()
 
 next_f = next(f)
 assert_type(next_f, int)
-assert_type(f, Generator[Literal[1], Any, None])
+assert_type(f, Generator[Literal[1], object, None])
 "#,
 );
 
@@ -33,7 +34,33 @@ def gen_with_return():
     yield 2
     return "done"
 
-assert_type(gen_with_return(), Generator[Literal[1, 2], Any, Literal['done']])
+assert_type(gen_with_return(), Generator[Literal[1, 2], object, Literal['done']])
+"#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/5758
+testcase!(
+    test_generator_iteration_requires_accepting_none,
+    r#"
+from collections.abc import Generator
+from typing import Any, assert_type
+
+def consume(
+    requires_str: Generator[int, str],
+    accepts_none: Generator[int, None],
+    accepts_optional: Generator[int, str | None],
+    accepts_object: Generator[int, object],
+    gradual: Generator[int, Any],
+):
+    for x in requires_str:  # E: send type `str` does not accept `None`
+        assert_type(x, int)
+    assert_type([x for x in requires_str], list[int])  # E: send type `str` does not accept `None`
+    for safe in (accepts_none, accepts_optional, accepts_object, gradual):
+        for x in safe:
+            assert_type(x, int)
+    # Explicit send and priming with next() are unaffected.
+    assert_type(next(requires_str), int)
+    assert_type(requires_str.send("ready"), int)
 "#,
 );
 
@@ -150,8 +177,8 @@ def nested_generator():
 def another_generator():
     yield 2
 
-assert_type(nested_generator(), Generator[Literal[1, 2, 3], Any, None])
-assert_type(another_generator(), Generator[Literal[2], Any, None])
+assert_type(nested_generator(), Generator[Literal[1, 2, 3], object, None])
+assert_type(another_generator(), Generator[Literal[2], object, None])
 "#,
 );
 
@@ -257,7 +284,7 @@ from typing import assert_type, Any, Literal, AsyncGenerator
 async def async_count_up_to():
     yield 2
     return 4 # E: Return statement with value is not allowed in async generator
-assert_type(async_count_up_to(), AsyncGenerator[Literal[2], Any])
+assert_type(async_count_up_to(), AsyncGenerator[Literal[2], object])
 "#,
 );
 
@@ -272,7 +299,7 @@ def generator2(x: int):
     yield x
     return generator()
 
-assert_type(generator2(1), Generator[int, Any, Generator[int, None, None]])
+assert_type(generator2(1), Generator[int, object, Generator[int, None, None]])
 "#,
 );
 
@@ -757,4 +784,87 @@ async def f1() -> A | AsyncGenerator[A]:
 async def f2() -> A | AsyncGenerator[A]:
     yield A()
     "#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/5757
+testcase!(
+    test_delegating_generator_send_type,
+    r#"
+from collections.abc import Generator, Iterator
+from typing import assert_type, reveal_type
+
+def delegate() -> Generator[int, str | None]:
+    sent = yield 1
+    assert_type(sent, str | None)
+
+def wrapper():
+    yield from delegate()
+
+reveal_type(wrapper())  # E: revealed type: Generator[int, object]
+
+def nested(depth: int):
+    yield depth
+    if depth:
+        yield from nested(depth - 1)
+
+reveal_type(nested(2))  # E: revealed type: Generator[int, object]
+
+def consume() -> Iterator[int]:
+    yield from nested(2)
+
+# The explicit send type is checked against the delegate and is not inferred.
+def annotated() -> Generator[int, str | None]:
+    yield from delegate()
+
+assert_type(annotated(), Generator[int, str | None])
+"#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/5757
+testcase!(
+    test_legacy_generator_send_type,
+    TestEnv::new().enable_legacy_generator_send_type(),
+    r#"
+from collections.abc import Generator
+from typing import Literal, assert_type, reveal_type
+
+def receiving():
+    received = yield 1
+    reveal_type(received)  # E: revealed type: Unknown
+
+reveal_type(receiving())  # E: revealed type: Generator[Literal[1], Unknown]
+
+def delegating():
+    yield from receiving()
+
+reveal_type(delegating())  # E: revealed type: Generator[Literal[1], Unknown]
+
+def annotated() -> Generator[int, str]:
+    received = yield 1
+    assert_type(received, str)
+"#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/5757
+testcase!(
+    test_inferred_generator_send_type_and_contextmanager,
+    TestEnv::new()
+        .enable_unknown_variable_type_error()
+        .enable_partially_unknown_type_error(),
+    r#"
+from contextlib import contextmanager
+from collections.abc import Generator
+from typing import assert_type
+
+def bare_yield():
+    sent = yield
+    assert_type(sent, object)
+
+assert_type(bare_yield(), Generator[None, object])
+bare_yield().send("value")
+
+@contextmanager
+def managed():
+    yield
+"#,
 );

@@ -88,6 +88,57 @@ def test2(**kwargs: Unpack[Coord]):
 );
 
 testcase!(
+    bug = "Mixed lambda parameters lose the remaining keyword types",
+    test_typed_dict_mixed_lambda_kwargs,
+    r#"
+from typing import Callable, Protocol, TypedDict, Unpack, assert_type
+
+class Options[T](TypedDict):
+    consumed: int
+    remaining: T
+
+class Callback(Protocol):
+    def __call__(self, **kwargs: Unpack[Options[str]]) -> None: ...
+
+def use_text(text: str) -> None: ...
+
+def apply[**P](f: Callable[P, None], g: Callable[P, None]) -> None: ...
+def source(**kwargs: Unpack[Options[str]]) -> None: ...
+
+cb: Callback = lambda consumed, **kwargs: use_text(kwargs["remaining"])  # E: `object` is not assignable to parameter `text` with type `str`
+apply(source, lambda consumed, **kwargs: (
+    assert_type(consumed, int),
+    assert_type(kwargs["remaining"], str),  # E: assert_type(object, str)
+    assert_type(kwargs["unknown"], object),
+    # `consumed` was bound to the named parameter, so it cannot be read from `kwargs`.
+    assert_type(kwargs["consumed"], object),
+    None,
+)[-1])
+    "#,
+);
+
+testcase!(
+    bug = "Mixed lambda kwargs lose the distinction between fields and extra items",
+    test_typed_dict_mixed_lambda_kwargs_extra_items,
+    r#"
+from typing import Protocol, TypedDict, Unpack, assert_type
+
+class Options(TypedDict, extra_items=int):
+    consumed: int
+    remaining: str
+
+class Callback(Protocol):
+    def __call__(self, **kwargs: Unpack[Options]) -> None: ...
+
+cb: Callback = lambda consumed, **kwargs: (
+    assert_type(kwargs["remaining"], str),  # E: assert_type(int | str, str)
+    assert_type(kwargs["unknown"], int),  # E: assert_type(int | str, int)
+    None,
+)[-1]
+    "#,
+);
+
+testcase!(
     test_qualifiers,
     r#"
 from typing import TypedDict, Required, NotRequired, ReadOnly, ClassVar, Final
@@ -924,7 +975,7 @@ testcase!(
 from typing import TypedDict, assert_type
 class TD0(TypedDict):
     x: int
-    y: TD1
+    y: "TD1"
 class TD1(TypedDict):
     x: int
     y: TD0

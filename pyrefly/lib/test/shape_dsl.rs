@@ -1212,7 +1212,7 @@ from typing import assert_type
 
 class Array[DType, Shape: IntTuple]:
     shape: Shape
-    def __getitem__[I: Index](self, index: I) -> Array[DType, index_shape(Shape, I)]: ...
+    def __getitem__[I: Index](self, index: I) -> "Array[DType, index_shape(Shape, I)]": ...
 
 def concrete(x: Array[float, [2, 3, 4]]) -> None:
     assert_type(x[0], Array[float, [3, 4]])
@@ -1670,8 +1670,8 @@ from shape_extensions import Index, IntTuple, index_shape
 from typing import reveal_type
 
 class Array[Shape: IntTuple, DType]:
-    def clone(self) -> Array[Shape, DType]: ...
-    def __getitem__[I: Index](self, index: I) -> Array[index_shape(Shape, I), DType]: ...
+    def clone(self) -> "Array[Shape, DType]": ...
+    def __getitem__[I: Index](self, index: I) -> "Array[index_shape(Shape, I), DType]": ...
 
 def f(x: Array[[2, 3], int]) -> None:
     y = x.clone()
@@ -2041,8 +2041,8 @@ def check[M: IntVar](
     assert_type(InferredBox(3), InferredBox[Int[3]])
     assert_type(InferredBox(3).result(), Tensor[[3]])
     assert_type(InferredBox(symbolic).result(), Tensor[[M]])
-    bounded(True)  # E: `bool` is not assignable to upper bound `Int[int]` of type variable `N`
-    bounded("nope")  # E: `str` is not assignable to upper bound `Int[int]` of type variable `N`
+    bounded(True)  # E: While checking parameter `x`: `bool` is not assignable to upper bound `Int[int]` of type variable `N`
+    bounded("nope")  # E: While checking parameter `x`: `str` is not assignable to upper bound `Int[int]` of type variable `N`
 
 def check_union(value: Int[3] | Int[4]) -> None:
     assert_type(bounded(value), Tensor[[int]])
@@ -2057,7 +2057,7 @@ def check_accumulated_upper_bound(
 class MyInt(int): ...
 
 def check_int_subclass(value: MyInt) -> None:
-    bounded(value)  # E: `MyInt` is not assignable to upper bound `Int[int]` of type variable `N`
+    bounded(value)  # E: While checking parameter `x`: `MyInt` is not assignable to upper bound `Int[int]` of type variable `N`
 
 # An `Int`-bound variable that substitution never resolves evaluates as the
 # gradual size, not as a symbolic dimension: only `IntVar` carries symbols.
@@ -5066,7 +5066,7 @@ from typing import reveal_type
 
 class Array[Meta: IntTuple, Shape: IntTuple, DType]:
     shape: Shape
-    def clone(self) -> Array[Meta, Shape, DType]: ...
+    def clone(self) -> "Array[Meta, Shape, DType]": ...
 
 def f[Shape: IntTuple](x: Array[IntTuple[1], Shape, int]) -> None:
     y = x.clone()
@@ -6098,7 +6098,7 @@ from shape_extensions import broadcast, IntTuple
 class Array[Shape: IntTuple, DType]:
     shape: Shape
     def dtype(self) -> DType: ...
-    def __add__[OtherShape: IntTuple](self, other: Array[OtherShape, DType]) -> Array[broadcast(Shape, OtherShape), DType]: ...
+    def __add__[OtherShape: IntTuple](self, other: "Array[OtherShape, DType]") -> "Array[broadcast(Shape, OtherShape), DType]": ...
 
 def f(
     x: Array[[2, 3], int],
@@ -6130,7 +6130,7 @@ from shape_extensions import broadcast, Int, IntTuple
 
 class Array[Shape: IntTuple, DType]:
     shape: Shape
-    def __add__[OtherShape: IntTuple](self, other: Array[OtherShape, DType]) -> Array[broadcast(Shape, OtherShape), DType]: ...
+    def __add__[OtherShape: IntTuple](self, other: "Array[OtherShape, DType]") -> "Array[broadcast(Shape, OtherShape), DType]": ...
 
 def f(
     known: Array[[5, 5], int],
@@ -12987,8 +12987,8 @@ def unpacked(middle: tuple[tuple[int, ...], ...]) -> None:
         ShapeTuple[tuple[IntTuple[2], *tuple[IntTuple, ...], IntTuple[3, 4]]],
     )
 
-capture(((2,), ("bad",)))  # E: is not assignable to upper bound `tuple[IntTuple, ...]`
-capture((2, 3))  # E: is not assignable to upper bound `tuple[IntTuple, ...]`
+capture(((2,), ("bad",)))  # E: While checking parameter `shapes`: `tuple[IntTuple[2], tuple[Literal['bad']]]` is not assignable to upper bound `tuple[IntTuple, ...]` of type variable `Shapes`
+capture((2, 3))  # E: While checking parameter `shapes`: `tuple[Literal[2], Literal[3]]` is not assignable to upper bound `tuple[IntTuple, ...]` of type variable `Shapes`
 
 narrow: Narrow[tuple[IntTuple[3], ...]]  # E: is not assignable to upper bound `tuple[IntTuple[2], ...]`
 "#,

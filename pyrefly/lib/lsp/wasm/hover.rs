@@ -1390,36 +1390,24 @@ fn resolve_hovered_type(
 
     // A nested callee takes precedence over the surrounding call's argument list.
     // Receivers and other argument expressions retain their own types.
-    let (callee_range_opt, call_arguments_range, hovering_over_callee) =
-        match ast.and_then(|ast| callee_at_position(transaction, handle, ast, position)) {
-            Some((callee_range, arguments_range, on_name)) => {
-                (Some(callee_range), Some(arguments_range), on_name)
-            }
-            None => (
-                transaction
-                    .get_callables_from_call(handle, position)
-                    .map(|info| info.callee_range),
-                None,
-                false,
-            ),
-        };
-
-    if let Some(callee_range) = callee_range_opt {
+    if let Some((callee_range, call_arguments_range, true)) =
+        ast.and_then(|ast| callee_at_position(transaction, handle, ast, position))
+    {
         let is_constructor = transaction
             .get_answers(handle)
             .and_then(|ans| ans.get_type_trace(callee_range))
             .is_some_and(is_constructor_call);
         if is_constructor && let Some(new_type) = override_constructor_return_type(type_.clone()) {
             type_ = new_type;
-        } else if hovering_over_callee {
+        } else {
             // Signature help owns navigation through an overload set. Keep the hover
             // compact by showing the same selected (or first) signature that it starts on.
-            type_ = call_arguments_range
-                .and_then(|range| transaction.get_callables_from_call(handle, range.start()))
+            type_ = transaction
+                .get_callables_from_call(handle, call_arguments_range.start())
                 .and_then(|info| {
                     info.callables
                         .get(info.chosen_overload_index.unwrap_or(0))
-                        .cloned()
+                        .map(|signature| signature.callable.clone())
                 })
                 .unwrap_or_else(|| transaction.coerce_type_to_callable(handle, type_));
         }

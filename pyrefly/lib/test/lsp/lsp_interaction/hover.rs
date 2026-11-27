@@ -239,7 +239,9 @@ fn test_hover_suppressed_error() {
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings {
-            configuration: Some(None),
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
             ..Default::default()
         })
         .unwrap();
@@ -311,7 +313,9 @@ fn test_hover_suppressed_error_subkind() {
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings {
-            configuration: Some(None),
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
             ..Default::default()
         })
         .unwrap();
@@ -341,7 +345,9 @@ fn test_hover_suppressed_error_deprecated_alias() {
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings {
-            configuration: Some(None),
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
             ..Default::default()
         })
         .unwrap();

@@ -53,7 +53,23 @@ def test_where_rejects_invalid_keyword_forms() -> None:
         torch.where(condition, tensor, 0.0, out=tensor)  # E: not assignable
 
 
+def test_inline_where_in_maximum() -> None:
+    condition = torch.tensor([[True, False], [False, True]])
+    left = torch.full((2, 2), 2.0)
+    right = torch.zeros((2, 2))
+    result = torch.maximum(torch.where(condition, left, right), right)
+    assert_shape(result.shape, (2, 2))
+    assert torch.equal(result, torch.tensor([[2.0, 0.0], [0.0, 2.0]]))
+
+
 if TYPE_CHECKING:
+
+    def check_inline_where_in_maximum[S: IntTuple](
+        condition: Tensor[S], left: Tensor[S], right: Tensor[S]
+    ) -> Tensor[S]:
+        selected = torch.where(condition, left, right)
+        assert_type(torch.maximum(selected, right), Tensor[S])
+        return torch.maximum(torch.where(condition, left, right), right)
 
     def check_symbolic_where[N: IntVar, M: IntVar](
         condition: Tensor[[N, 1]],

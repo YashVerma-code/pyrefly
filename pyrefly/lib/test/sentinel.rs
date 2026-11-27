@@ -104,7 +104,7 @@ testcase!(
     r#"
 from typing_extensions import Sentinel
 
-A: A = Sentinel("A")  # E: Circular reference to `A` in annotation
+A: A = Sentinel("A")  # E: Circular reference to `A` in annotation  # E: `A` is uninitialized
     "#,
 );
 

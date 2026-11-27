@@ -31,18 +31,18 @@ assert_type(async_f, Callable[[], Coroutine[Any, Any, int]])
 def gen():
     oops: int = "oops"  # E:
     yield x
-assert_type(gen, Callable[[], Generator[int, Any, None]])
+assert_type(gen, Callable[[], Generator[int, object, None]])
 
 def gen_w_return():
     oops: int = "oops"  # E:
     yield x
     return x
-assert_type(gen_w_return, Callable[[], Generator[int, Any, int]])
+assert_type(gen_w_return, Callable[[], Generator[int, object, int]])
 
 async def async_gen():
     oops: int = "oops"  # E:
     yield x
-assert_type(async_gen, Callable[[], AsyncGenerator[int, Any]])
+assert_type(async_gen, Callable[[], AsyncGenerator[int, object]])
 "#,
 );
 
@@ -413,12 +413,12 @@ assert_type(annotated_async(0), Coroutine[Any, Any, int])
 # Annotated generator: return type IS inferred
 def annotated_gen(x: int):
     yield x
-assert_type(annotated_gen(0), Generator[int, Any, None])
+assert_type(annotated_gen(0), Generator[int, object, None])
 
 # Annotated async generator: return type IS inferred
 async def annotated_async_gen(x: int):
     yield x
-assert_type(annotated_async_gen(0), AsyncGenerator[int, Any])
+assert_type(annotated_async_gen(0), AsyncGenerator[int, object])
 "#,
 );
 

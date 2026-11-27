@@ -77,6 +77,11 @@
           "type": "boolean",
           "default": true
         },
+        "legacy-generator-send-type": {
+          "description": "Use Unknown rather than object for inferred generator send types for mypy and Pyright compatibility.",
+          "type": "boolean",
+          "default": false
+        },
         "class-decorator-behavior": {
           "description": "How class decorators affect class types. Ignore decorator results except explicit type[Any] erasure, or apply decorators whose results are typed. Defaults to ignore in the basic and legacy presets, and typed-only otherwise.",
           "type": "string",
@@ -239,6 +244,11 @@
         },
         "skip-interpreter-query": {
           "description": "Skip querying any interpreters and do not do any environment autoconfiguration. This means that Pyrefly will take hard-coded defaults for python-version and python-platform, and will use an empty site-packages-path.",
+          "type": "boolean",
+          "default": false
+        },
+        "disable-pythonpath-warning": {
+          "description": "Don't warn that the PYTHONPATH environment variable is set when querying a Python interpreter.",
           "type": "boolean",
           "default": false
         },
@@ -410,8 +420,15 @@
                 "required": ["matches"],
                 "properties": {
                   "matches": {
-                    "description": "A filesystem glob pattern detailing which files the config applies to.",
-                    "type": "string"
+                    "description": "A filesystem glob or a non-empty list of globs. The sub-config applies if any glob matches.",
+                    "anyOf": [
+                      { "type": "string" },
+                      {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                      }
+                    ]
                   }
                 }
               }

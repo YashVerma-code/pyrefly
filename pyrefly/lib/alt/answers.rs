@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use dupe::Dupe;
 use dupe::OptionDupedExt;
+use pyrefly_build::handle::Handle;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::module_key::ModuleKey;
 use pyrefly_python::module_name::ModuleName;
@@ -50,6 +51,8 @@ use crate::alt::answers_solver::ReservedSlot;
 use crate::alt::answers_solver::ThreadState;
 use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
+use crate::alt::class::attrs::AttrsInitName;
+use crate::alt::class::class_field::DataclassMember;
 use crate::alt::traits::Solve;
 use crate::binding::binding::AnyIdx;
 use crate::binding::binding::Exported;
@@ -117,6 +120,8 @@ pub struct Index {
     pub constructor_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
     /// Literal slot occurrences, including attributes declared in this module.
     pub slot_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
+    /// Constructor keywords that refer to class fields, including fields defined in this module.
+    pub keyword_argument_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
     /// A map from (child method range) to a list of parent method definitions (ModulePath, parent method).
     /// This is used to find reimplementations when doing find-references on parent methods.
     pub parent_methods_map: SmallMap<TextRange, Vec<(ModulePath, IndexedAttribute)>>,
@@ -152,6 +157,8 @@ pub enum AttributeReferenceKind {
     ConstructorCall,
     /// A literal name in the owning class's `__slots__` binding.
     Slot,
+    /// A keyword argument to a synthesized initializer that refers to a class field.
+    KeywordArgument,
 }
 
 /// Visiting a trace store reaches every type recorded in it.
@@ -172,15 +179,35 @@ impl VisitMut<Type> for Traces {
     }
 }
 
+/// Receiver information that a callable signature alone cannot preserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TraceReceiver {
+    /// The trace lacks binding information; the callee determines receiver handling.
+    Unknown,
+    /// The implicit receiver is still present in this bound-call signature.
+    Present,
+    /// Recovery has already removed the implicit receiver from the signature.
+    Stripped,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverloadTrace {
-    callable: Callable,
+    pub(crate) callable: Callable,
     tparams: Option<Arc<TParams>>,
+    pub(crate) receiver: TraceReceiver,
 }
 
 impl OverloadTrace {
-    pub(crate) fn new(callable: Callable, tparams: Option<Arc<TParams>>) -> Self {
-        Self { callable, tparams }
+    pub(crate) fn new(
+        callable: Callable,
+        tparams: Option<Arc<TParams>>,
+        receiver: TraceReceiver,
+    ) -> Self {
+        Self {
+            callable,
+            tparams,
+            receiver,
+        }
     }
 
     fn as_type(&self) -> Type {
@@ -226,11 +253,11 @@ impl OverloadedCallee {
         }
     }
 
-    fn signatures(&self) -> (Vec<Callable>, Option<usize>) {
+    fn signatures(&self) -> (Vec<OverloadTrace>, Option<usize>) {
         match self {
-            Self::Resolved { callable } => (vec![callable.callable.clone()], Some(0)),
+            Self::Resolved { callable } => (vec![callable.clone()], Some(0)),
             Self::Candidates { all, closest, .. } => (
-                all.iter().map(|trace| trace.callable.clone()).collect(),
+                all.clone(),
                 all.iter()
                     .position(|trace| trace.callable == closest.callable),
             ),
@@ -1364,6 +1391,9 @@ impl LookupModule {
 }
 
 pub trait LookupAnswer: Sized {
+    /// The module and Python environment used by this lookup.
+    fn handle(&self) -> &Handle;
+
     /// Look up the value of `k` in `module`.
     ///
     /// Return None if the file is undergoing concurrent modification.
@@ -1994,7 +2024,7 @@ impl Answers {
     pub fn get_all_overload_trace(
         &self,
         range: TextRange,
-    ) -> Option<(Vec<Callable>, Option<usize>)> {
+    ) -> Option<(Vec<OverloadTrace>, Option<usize>)> {
         let lock = self.trace.as_ref()?.lock();
         Some(lock.overloaded_callees.get(&range)?.signatures())
     }
@@ -2025,10 +2055,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if self.current().trace.is_some()
             && let Some(callable) = ty.clone().to_callable()
         {
+            let receiver = if matches!(ty, Type::BoundMethod(_)) {
+                TraceReceiver::Present
+            } else {
+                TraceReceiver::Unknown
+            };
             self.trace_state().record_resolved_trace(
                 loc,
                 OverloadedCallee::Resolved {
-                    callable: OverloadTrace::new(callable, None),
+                    callable: OverloadTrace::new(callable, None, receiver),
                 },
             );
         }
@@ -2066,6 +2101,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return;
         }
         if let Some(index) = &self.current().index {
+            if let (AttributeReferenceKind::KeywordArgument, Type::ClassDef(cls)) =
+                (reference_kind, base)
+            {
+                let metadata = self.get_metadata_for_class(cls);
+                let is_field_parameter = metadata.dataclass_metadata().is_some_and(|dataclass| {
+                    dataclass.fields.contains_key(attribute_name)
+                        && matches!(
+                            self.get_dataclass_member(cls, attribute_name),
+                            DataclassMember::Field(_, flags) | DataclassMember::InitVar(_, flags)
+                                if flags.init_by_name && (flags.init || metadata.is_pydantic_model())
+                        )
+                        && !matches!(
+                            self.attrs_init_param_name(cls, attribute_name, dataclass),
+                            AttrsInitName::Renamed(_)
+                        )
+                });
+                if !is_field_parameter {
+                    return;
+                }
+            }
             for AttrInfo {
                 name,
                 ty: _,
@@ -2084,6 +2139,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         AttributeReferenceKind::Slot => index
                             .lock()
                             .slot_references
+                            .entry(cls.module_path().dupe())
+                            .or_default()
+                            .push((
+                                IndexedAttribute {
+                                    cls: cls.index(),
+                                    name,
+                                },
+                                attribute_reference_range,
+                            )),
+                        AttributeReferenceKind::KeywordArgument => index
+                            .lock()
+                            .keyword_argument_references
                             .entry(cls.module_path().dupe())
                             .or_default()
                             .push((

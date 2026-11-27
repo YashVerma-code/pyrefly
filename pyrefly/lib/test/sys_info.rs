@@ -73,7 +73,7 @@ from typing import assert_type
 import sys
 if sys.version_info >= (3, 0):
     class Bar:
-        def magic(self) -> Foo:
+        def magic(self) -> "Foo":
             return Foo()
     class Foo: ...
 

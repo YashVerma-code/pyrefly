@@ -25,9 +25,9 @@ jobs:
               repo: context.repo.repo,
               path: '.github/owners.json',
             });
-            const OWNERS = JSON.parse(
+            const OWNERS = Object.keys(JSON.parse(
               Buffer.from(ownersFile.data.content, 'base64').toString('utf8'),
-            );
+            ));
 
             const author = context.payload.pull_request.user.login;
 

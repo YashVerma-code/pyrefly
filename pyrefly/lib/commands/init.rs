@@ -49,8 +49,8 @@ pub struct InitArgs {
     /// Useful for CI, scripted workflows, or running init before check in automated pipelines.
     #[arg(long)]
     non_interactive: bool,
-    /// Which type checker config to migrate from when multiple are present.
-    /// When set to "auto" (the default), tries mypy first, then pyright.
+    /// Which type checker config to migrate from. Auto uses mypy or a Pyright-family config.
+    /// An explicit choice uses only that checker, including when `pyrightconfig.json` is shared.
     #[arg(long, value_enum, default_value_t = MigrationSource::Auto)]
     migrate_from: MigrationSource,
     /// Preview what `pyrefly init` would do without writing or modifying any
@@ -283,14 +283,16 @@ impl InitArgs {
             }
         }
 
-        // 1. Check for mypy or pyright configuration
-        let found_mypy = ConfigFileKind::MyPy.check_for_existing_config(&path)?;
-        let found_pyright = ConfigFileKind::Pyright.check_for_existing_config(&path)?;
-        let found_basedpyright = ConfigFileKind::BasedPyright.check_for_existing_config(&path)?;
-
-        // 2. Migrate existing configuration to Pyrefly configuration
-        if found_mypy || found_pyright || found_basedpyright {
-            info!("Found an existing type checking configuration - setting up pyrefly ...");
+        // An explicit source must fail if its configuration is missing instead of
+        // falling through to creation of an unrelated default config.
+        if self.migrate_from != MigrationSource::Auto
+            || ConfigFileKind::MyPy.check_for_existing_config(&path)?
+            || ConfigFileKind::Pyright.check_for_existing_config(&path)?
+            || ConfigFileKind::BasedPyright.check_for_existing_config(&path)?
+        {
+            if self.migrate_from == MigrationSource::Auto {
+                info!("Found an existing type checking configuration - setting up pyrefly ...");
+            }
             let migrated =
                 config_migration(&path, self.migrate_from, self.dry_run, self.print_config)?;
             return Ok((CommandExitStatus::Success, Some(migrated)));

@@ -158,7 +158,7 @@ from typing import reveal_type, TypeVar, Union
 
 T = TypeVar("T")
 
-X = Union[T, list[X[T]]]
+X = Union[T, "list[X[T]]"]
 
 x1: X[int] = [[1]]
 x2: X[str] = [[1]]  # E: not assignable
@@ -175,7 +175,7 @@ from typing import reveal_type, TypeAliasType, TypeVar, Union
 
 T = TypeVar("T")
 
-X = TypeAliasType("X", T | list[X[T]], type_params=(T,))
+X = TypeAliasType("X", T | list["X[T]"], type_params=(T,))
 
 x1: X[int] = [[1]]
 x2: X[str] = [[1]]  # E: not assignable
@@ -190,7 +190,7 @@ testcase!(
     r#"
 from typing import Union
 type X = int | list[X[int]]  # E: `type[X]` is not subscriptable
-Y = Union[int, list[Y[int]]]  # E: `type[Y]` is not subscriptable
+Y = Union[int, "list[Y[int]]"]  # E: `type[Y]` is not subscriptable
     "#,
 );
 

@@ -334,12 +334,12 @@ fn test_rename_editable_source_with_third_party_stub() {
 
 #[test]
 fn test_rename_editable_source_with_bundled_stub() {
-    // `requests` is an editable install without `py.typed`, so imports of it resolve to the
+    // `toml` is an editable install without `py.typed`, so imports of it resolve to the
     // typeshed stubs bundled with Pyrefly.
     let root = TempDir::new().unwrap();
     let site_packages = root.path().join("venv/lib/python3.12/site-packages");
-    let source = root.path().join("editable_src/requests/api.py");
-    let dist_info = site_packages.join("requests-0.1.dist-info");
+    let source = root.path().join("editable_src/toml/decoder.py");
+    let dist_info = site_packages.join("toml-0.1.dist-info");
     let user_code = root.path().join("user.py");
     for dir in [source.parent().unwrap(), &dist_info] {
         std::fs::create_dir_all(dir).unwrap();
@@ -349,8 +349,8 @@ fn test_rename_editable_source_with_bundled_stub() {
         "site_package_path = [\"venv/lib/python3.12/site-packages\", \"editable_src\"]\n",
     )
     .unwrap();
-    std::fs::write(root.path().join("editable_src/requests/__init__.py"), "").unwrap();
-    std::fs::write(&source, "def get(url):\n    return url\n").unwrap();
+    std::fs::write(root.path().join("editable_src/toml/__init__.py"), "").unwrap();
+    std::fs::write(&source, "def loads(s):\n    return s\n").unwrap();
     std::fs::write(
         dist_info.join("direct_url.json"),
         json!({
@@ -360,7 +360,11 @@ fn test_rename_editable_source_with_bundled_stub() {
         .to_string(),
     )
     .unwrap();
-    std::fs::write(&user_code, "from requests.api import get\n\nget(\"\")\n").unwrap();
+    std::fs::write(
+        &user_code,
+        "from toml.decoder import loads\n\nloads(\"\")\n",
+    )
+    .unwrap();
 
     let mut interaction = LspInteraction::new();
     interaction.set_root(root.path().to_path_buf());
@@ -375,9 +379,9 @@ fn test_rename_editable_source_with_bundled_stub() {
         })
         .unwrap();
     interaction.client.did_open("user.py");
-    interaction.client.did_open("editable_src/requests/api.py");
+    interaction.client.did_open("editable_src/toml/decoder.py");
 
-    // Renaming `get` would require editing the bundled stub, so it is not allowed.
+    // Renaming `loads` would require editing the bundled stub, so it is not allowed.
     let position = json!({
         "textDocument": {"uri": Uri::from_file_path(&source).unwrap().to_string()},
         "position": {"line": 0, "character": 4},

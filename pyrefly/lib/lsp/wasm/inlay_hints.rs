@@ -478,7 +478,7 @@ impl<'a> Transaction<'a> {
                         // If we have overload information, use the chosen overload
                         overloads
                             .get(chosen_idx.unwrap_or_default())
-                            .map(|c| Type::Callable(Box::new(c.clone())))
+                            .map(|c| Type::Callable(Box::new(c.callable.clone())))
                     } else {
                         // Otherwise, try to get the type of the callee directly
                         answers.get_type_trace(call.func.range())

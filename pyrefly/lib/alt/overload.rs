@@ -34,6 +34,7 @@ use vec1::Vec1;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers::OverloadTrace;
+use crate::alt::answers::TraceReceiver;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::call::TargetWithTParams;
 use crate::alt::callable::ArgMap;
@@ -64,6 +65,14 @@ use crate::types::quantified::Quantified;
 use crate::types::type_var::Restriction;
 use crate::types::types::Type;
 use crate::types::types::Var;
+
+/// Receiver handling at the overload-matching boundary.
+pub(crate) enum OverloadReceiver {
+    None,
+    Bound(Type),
+    /// Receiver recovery has already removed it from every candidate signature.
+    Stripped,
+}
 
 struct CalledOverload<'f> {
     func: &'f TargetWithTParams<Function>,
@@ -315,11 +324,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Calls an overloaded function, returning the return type, the closest matching overload
     /// signature, and the solutions that signature settled on.
-    pub fn call_overloads(
+    pub(crate) fn call_overloads(
         &self,
         overloads: Vec1<TargetWithTParams<Function>>,
         metadata: &FuncMetadata,
-        self_obj: Option<Type>,
+        receiver: OverloadReceiver,
         args: &[CallArg],
         keywords: &[CallKeyword],
         arguments_range: TextRange,
@@ -331,6 +340,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // If we're constructing a class, its type arguments. A successful call will fill these in.
         ctor_targs: Option<&mut TArgs>,
     ) -> (Type, Callable, OverloadTable, ArgMap) {
+        let (self_obj, trace_receiver) = match receiver {
+            OverloadReceiver::None => (None, TraceReceiver::Unknown),
+            OverloadReceiver::Bound(obj) => (Some(obj), TraceReceiver::Present),
+            OverloadReceiver::Stripped => (None, TraceReceiver::Stripped),
+        };
         // There may be Expr values in args and keywords.
         // If we infer them for each overload, we may end up inferring them multiple times.
         // If those overloads contain nested overloads, then we can easily end up with O(2^n) perf.
@@ -508,7 +522,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             *targs = chosen_targs;
         }
-        self.trace_overload_call(&overloads, closest_overload.func, arguments_range, matched);
+        self.trace_overload_call(
+            &overloads,
+            closest_overload.func,
+            arguments_range,
+            matched,
+            trace_receiver,
+        );
         if matched {
             self.report_deprecated_overload(
                 &closest_overload.func.1,
@@ -523,6 +543,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 self.add_specialization_errors(
                     specialization_errors,
+                    Some(&closest_overload.argmap),
                     arguments_range,
                     call_errors,
                     None,
@@ -546,6 +567,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 self.add_specialization_errors(
                     specialization_errors,
+                    Some(&closest_overload.argmap),
                     arguments_range,
                     &closest_overload.call_errors,
                     None,
@@ -581,6 +603,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         closest: &TargetWithTParams<Function>,
         range: TextRange,
         chosen: bool,
+        receiver: TraceReceiver,
     ) {
         // Guard on the trace sink before building the (per-signature cloned) traces, which
         // would otherwise be wasted work in a normal non-tracing check.
@@ -593,7 +616,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .as_ref()
                 .filter(|tparams| !tparams.is_empty())
                 .cloned();
-            OverloadTrace::new(target.1.signature.clone(), tparams)
+            OverloadTrace::new(target.1.signature.clone(), tparams, receiver)
         };
         let all_overload_traces = overloads.iter().map(overload_trace).collect();
         self.record_overload_trace(range, all_overload_traces, overload_trace(closest), chosen);

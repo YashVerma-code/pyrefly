@@ -6,6 +6,7 @@
  */
 
 use std::fmt;
+use std::mem;
 
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
@@ -109,6 +110,12 @@ pub enum AtomicNarrowOp {
     /// `MatchSubjectElement($S, 1)` narrows the original `b` to that case's `$S[1]` type.
     /// The binding index identifies the narrowed `$S` for the current case.
     MatchSubjectElement(Idx<Key>, usize),
+    /// The subject was just assigned by a walrus, and the key is that assignment's binding;
+    /// narrows the subject to the assigned type. A walrus in a later operand of a boolean
+    /// operation only runs when the earlier operands pass, so the flow merge after the
+    /// operation widens the name again. In a position where the whole test is known to have
+    /// passed, such as the body of `if u and (u := str(u)):`, this restores the assigned type.
+    WalrusValue(Idx<Key>),
     /// Narrowing for sequence pattern matching - confirms the subject is a sequence type
     IsSequence,
     /// Negation of IsSequence - confirms the subject is NOT a sequence type
@@ -167,6 +174,7 @@ impl NarrowOp {
                     | AtomicNarrowOp::IsTruthy
                     | AtomicNarrowOp::IsFalsy
                     | AtomicNarrowOp::MatchSubjectElement(_, _)
+                    | AtomicNarrowOp::WalrusValue(_)
                     | AtomicNarrowOp::Placeholder
             ),
             Self::And(ops) | Self::Or(ops) => ops.iter().all(Self::is_plain_root),
@@ -253,6 +261,7 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
             AtomicNarrowOp::MatchSubjectElement(subject, index) => {
                 write!(f, "MatchSubjectElement({subject:?}, {index})")
             }
+            AtomicNarrowOp::WalrusValue(value) => write!(f, "WalrusValue({value:?})"),
             AtomicNarrowOp::IsNotSequence => write!(f, "IsNotSequence"),
             AtomicNarrowOp::IsMapping => write!(f, "IsMapping"),
             AtomicNarrowOp::IsNotMapping => write!(f, "IsNotMapping"),
@@ -401,6 +410,7 @@ impl AtomicNarrowOp {
             )),
             Self::Placeholder => None,
             Self::MatchSubjectElement(_, _) => None,
+            Self::WalrusValue(_) => None,
             Self::ClassCoverageGate(_) | Self::ClassCoverageGateNeg(_) => None,
         }
     }
@@ -449,6 +459,8 @@ impl AtomicNarrowOp {
             Self::Placeholder => Self::Placeholder,
             // Element projections apply only within the current case.
             Self::MatchSubjectElement(_, _) => Self::Placeholder,
+            // Whether the test passed or failed, an evaluated walrus has assigned its value.
+            Self::WalrusValue(value) => Self::WalrusValue(*value),
             Self::ClassCoverageGate(ks) => Self::ClassCoverageGateNeg(ks.clone()),
             Self::ClassCoverageGateNeg(ks) => Self::ClassCoverageGate(ks.clone()),
         }
@@ -572,6 +584,16 @@ impl NarrowOp {
     pub fn negate(&self) -> Self {
         match self {
             Self::Atomic(attr, op) => Self::Atomic(attr.clone(), op.negate()),
+            // A walrus assigns its value whether or not the test passes, so that fact stays
+            // in front of the negation; only the conditions on the value are negated.
+            Self::And(ops)
+                if let [
+                    fact @ Self::Atomic(None, AtomicNarrowOp::WalrusValue(_)),
+                    conditions @ ..,
+                ] = ops.as_slice() =>
+            {
+                Self::And(vec![fact.clone(), Self::And(conditions.to_vec()).negate()])
+            }
             Self::And(ops) => Self::Or(ops.map(|op| op.negate())),
             Self::Or(ops) => Self::And(ops.map(|op| op.negate())),
         }
@@ -1346,6 +1368,21 @@ impl NarrowOps {
                     AtomicNarrowOp::IsTruthy,
                     named.target.range(),
                 );
+                // Where this test is known to have passed, the target holds the assigned value,
+                // even if the walrus sits in a later operand of a boolean operation and the
+                // flow after the operation merges it with the earlier value of the name.
+                if let Expr::Name(name) = &*named.target
+                    && let Some(value) =
+                        builder.promised_idx(&Key::Definition(ShortIdentifier::expr_name(name)))
+                {
+                    for (op, _) in target_narrow.0.values_mut() {
+                        let is_truthy = mem::replace(
+                            op,
+                            NarrowOp::Atomic(None, AtomicNarrowOp::WalrusValue(value)),
+                        );
+                        op.and(is_truthy);
+                    }
+                }
                 let value_narrow =
                     Self::from_expr_helper(builder, Some(*named.value.clone()).as_ref(), seen);
                 // Merge the entries from the two `NarrowOps`

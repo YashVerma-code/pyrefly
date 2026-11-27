@@ -310,6 +310,7 @@ fn join_strings(strings: &[String]) -> String {
 pub fn parse_pyproject_config(raw_file: &str) -> anyhow::Result<ConfigFile> {
     let ini = pyproject_to_ini(raw_file)?;
     let mut cfg = ConfigFile::default();
+    cfg.root.legacy_generator_send_type = Some(true);
 
     let config_options: Vec<Box<dyn ConfigOptionMigrater>> = vec![
         Box::new(ProjectIncludes),
@@ -362,7 +363,9 @@ description = "A project used in a test"
     fn test_missing_fields() -> anyhow::Result<()> {
         // Yes, we should never expect to encounter a [tool.mypy] with no fields in it.
         // But this test ensures that all fields are optional.
-        parse_pyproject_config("[tool.mypy]\n").map(|_| ())
+        let config = parse_pyproject_config("[tool.mypy]\n")?;
+        assert_eq!(config.root.legacy_generator_send_type, Some(true));
+        Ok(())
     }
 
     #[test]

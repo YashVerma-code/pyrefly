@@ -622,10 +622,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Outer-level uncertainty makes assignability insufficient evidence for subtraction.
-    /// Type arguments do not affect the runtime class tested by `isinstance`.
+    /// Type arguments and intersection fallbacks do not describe that uncertainty.
     fn is_toplevel_gradual(&self, ty: &Type) -> bool {
         match ty {
             Type::Any(_) => true,
+            Type::Intersect(intersection) => intersection.0.iter().any(Type::is_any),
             Type::ClassType(cls) | Type::SelfType(cls) => self.extends_any(cls.class_object()),
             _ => false,
         }
@@ -1678,6 +1679,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 );
                 self.intersect_with_fallback(ty, &element, IntersectFallback::Right)
             }
+            AtomicNarrowOp::WalrusValue(value) => self.get_idx(*value).ty().clone(),
             AtomicNarrowOp::ClassCoverageGate(_) => ty.clone(),
             AtomicNarrowOp::ClassCoverageGateNeg(keys) => {
                 // Subtract the class only when every positional slot's sub-pattern exhausts its

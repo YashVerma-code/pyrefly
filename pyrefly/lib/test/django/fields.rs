@@ -299,7 +299,7 @@ class Counter(models.Model):
         self.optional_count = Value(1)
         assert_type(self.optional_count, int | None)
 
-    def bump_explicit(self: Counter) -> None:
+    def bump_explicit(self: "Counter") -> None:
         self.count = F("count") + 1
 
 class SpecialCounter(Counter):

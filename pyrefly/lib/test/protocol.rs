@@ -1298,7 +1298,7 @@ def g(x: Q[int]) -> None: ...
 def h(x: Q[str]) -> None: ...
 
 class C(P):
-    def method(self) -> list[C]:
+    def method(self) -> "list[C]":
         return []
 
     def foo(self) -> P:
@@ -1306,7 +1306,7 @@ class C(P):
         return self
 
 class D(Q[int]):
-    def method(self, x: int) -> list[D]:
+    def method(self, x: int) -> "list[D]":
         return []
 
     def foo(self) -> None:
@@ -2374,16 +2374,16 @@ class Q(Protocol):
 class P(Protocol):
     @overload
     @classmethod
-    def make(cls: type[Child], x: int) -> int: ...
+    def make(cls: "type[Child]", x: int) -> int: ...
     @overload
     @classmethod
-    def make(cls: type[Child], x: str) -> str: ...
+    def make(cls: "type[Child]", x: str) -> str: ...
     @classmethod
     def make(cls, x: int | str) -> int | str:
         return x
     @overload
     @classmethod
-    def pick(cls: type[Child], x: int) -> int: ...
+    def pick(cls: "type[Child]", x: int) -> int: ...
     @overload
     @classmethod
     def pick(cls: type[Q], x: int) -> str: ...
@@ -2400,7 +2400,7 @@ class P(Protocol):
     def needs_q(cls, x: int | str) -> int | str:
         return x
     @classmethod
-    def plain(cls: type[Child]) -> int:
+    def plain(cls: "type[Child]") -> int:
         return 0
 class Child(P, Protocol): ...
 assert_type(Child.plain(), int)
@@ -2592,7 +2592,7 @@ def f[T: A](a: T) -> T:
     return a
 def g(b: B, c: C):
     f(b)
-    f(c)  # E: `C` is not assignable to upper bound `A`
+    f(c)  # E: While checking parameter `a`: `C` is not assignable to upper bound `A` of type variable `T`
     "#,
 );
 
@@ -2607,12 +2607,12 @@ U = TypeVar('U')
 
 class Functor(Protocol[T]):  # E: Type variable `T` in class `Functor` is declared as invariant, but could be covariant based on its usage
     """A Functor protocol - common in functional programming."""
-    def map(self, f: Callable[[T], U]) -> Functor[U]: ...
+    def map(self, f: Callable[[T], U]) -> "Functor[U]": ...
 
 class Maybe(Generic[T]):
     """A Maybe/Option type that should implement Functor."""
     value: T | None
-    def map(self, f: Callable[[T], U]) -> Maybe[U]: ...
+    def map(self, f: Callable[[T], U]) -> "Maybe[U]": ...
 
 def test():
     m: Maybe[int] = ...  # type: ignore
@@ -2836,9 +2836,9 @@ R = TypeVar("R", covariant=True)
 
 class Lens(Protocol[S, R]):
     @overload
-    def __call__[S2, R2](self: Lens[S2, R2], state: S2, /, value: R2) -> S2: ...
+    def __call__[S2, R2](self: "Lens[S2, R2]", state: S2, /, value: R2) -> S2: ...
     @overload
-    def __call__[S2, R2](self: Lens[S2, R2], state: S2, /) -> R2: ...
+    def __call__[S2, R2](self: "Lens[S2, R2]", state: S2, /) -> R2: ...
 
 
 class BaseLens(Lens[S, R], Protocol):
@@ -2857,9 +2857,9 @@ S = TypeVar("S", covariant=True)
 
 class A(Protocol[S]):
     @overload
-    def __call__[S2, R2](self: B[S2], state: S2, /, value: R2) -> S2: ...
+    def __call__[S2, R2](self: "B[S2]", state: S2, /, value: R2) -> S2: ...
     @overload
-    def __call__[S2, R2](self: B[S2], state: S2, /) -> R2: ...
+    def __call__[S2, R2](self: "B[S2]", state: S2, /) -> R2: ...
 
 
 class B(Protocol[S]):
@@ -2886,17 +2886,17 @@ R = TypeVar("R", covariant=True)
 
 class Lens(Protocol[S, R]):
     @overload
-    def __call__[S2, R2](self: Lens[S2, R2], state: S2, /, value: R2) -> S2: ...
+    def __call__[S2, R2](self: "Lens[S2, R2]", state: S2, /, value: R2) -> S2: ...
     @overload
-    def __call__[S2, R2](self: Lens[S2, R2], state: S2, /) -> R2: ...
+    def __call__[S2, R2](self: "Lens[S2, R2]", state: S2, /) -> R2: ...
     def extra(self) -> int: ...
 
 
 class HasCallNoExtra(Protocol[S, R]):
     @overload
-    def __call__[S2, R2](self: HasCallNoExtra[S2, R2], state: S2, /, value: R2) -> S2: ...
+    def __call__[S2, R2](self: "HasCallNoExtra[S2, R2]", state: S2, /, value: R2) -> S2: ...
     @overload
-    def __call__[S2, R2](self: HasCallNoExtra[S2, R2], state: S2, /) -> R2: ...
+    def __call__[S2, R2](self: "HasCallNoExtra[S2, R2]", state: S2, /) -> R2: ...
 
 
 def f(x: HasCallNoExtra[int, str]) -> Lens[int, str]:
@@ -2930,7 +2930,7 @@ from typing import Protocol, overload
 
 class Arr[S, T]:
     @overload
-    def astype[S2, T2](self: Arr[S2, T2], dtype: int) -> Arr[S2, T2]: ...
+    def astype[S2, T2](self: "Arr[S2, T2]", dtype: int) -> "Arr[S2, T2]": ...
     @overload
     def astype(self, dtype: str) -> bytes: ...
     def astype(self, dtype: object) -> object: ...
@@ -2950,7 +2950,7 @@ from typing import Protocol, overload
 
 class Arr[S, T]:
     @overload
-    def m[S2](self: Arr[S2, int], x: int) -> int: ...
+    def m[S2](self: "Arr[S2, int]", x: int) -> int: ...
     @overload
     def m(self, x: str) -> str: ...
     def m(self, x: object) -> object: ...
@@ -2990,7 +2990,7 @@ Generic: type[_Generic]
 Protocol: _SpecialForm
 
 class G(Generic[T]): ...  # E: uninitialized
-class P(Protocol):
+class P(Protocol):  # E: `Protocol` is uninitialized
     def f(self) -> int: ...
 class PT(Protocol[T]):  # E: uninitialized
     def f(self, x: T) -> T: ...
@@ -3016,7 +3016,7 @@ class _Protocol: ...
 
 Protocol: type[_Protocol]
 
-class P(Protocol):
+class P(Protocol):  # E: `Protocol` is uninitialized
     def f(self) -> int: ...
 class PT(Protocol[T]):  # E: uninitialized
     def f(self, x: T) -> T: ...

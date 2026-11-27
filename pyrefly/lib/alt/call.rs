@@ -42,6 +42,7 @@ use vec1::Vec1;
 
 use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
+use crate::alt::answers::TraceReceiver;
 use crate::alt::answers::TraceSideEffects;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::NoAccessReason;
@@ -59,6 +60,7 @@ use crate::alt::expr::ExprCallee;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::nn_module_specials::is_nn_sequential;
 use crate::alt::overload::ArgsExpander;
+use crate::alt::overload::OverloadReceiver;
 use crate::alt::unwrap::HintRef;
 use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Key;
@@ -322,6 +324,7 @@ impl ConstructedInstance {
         if let Some(specialization_errors) = self.specialization_errors {
             answers.add_specialization_errors(
                 specialization_errors,
+                None,
                 arguments_range,
                 errors,
                 context,
@@ -1292,6 +1295,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         keywords: &[CallKeyword],
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
+        allow_getattr_fallback: bool,
     ) -> Option<Type> {
         let callee_ty = self.type_of_magic_dunder_attr(
             ty,
@@ -1300,7 +1304,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             errors,
             context,
             "Expr::call_method",
-            true,
+            allow_getattr_fallback,
         )?;
         // Record the method type for hover support
         self.record_resolved_trace(range, &callee_ty);
@@ -1392,14 +1396,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn add_specialization_errors(
         &self,
-        specialization_errors: Vec1<TypeVarSpecializationError>,
+        specialization_errors: impl IntoIterator<Item = TypeVarSpecializationError>,
+        argmap: Option<&ArgMap>,
         range: TextRange,
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) {
         for e in specialization_errors {
             let kind = e.error_kind();
-            self.error_with_context(errors, range, kind, e.to_error_msg(self), context);
+            let parameter = e
+                .argument
+                .and_then(|argument| argmap?.parameter_name(argument));
+            let msg = e.to_error_msg(self);
+            let msg = match parameter {
+                Some(parameter) => format!("While checking parameter `{parameter}`: {msg}"),
+                None => msg,
+            };
+            self.error_with_context(errors, range, kind, msg, context);
         }
     }
 
@@ -2277,6 +2290,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ctor_targs: Option<&mut TArgs>,
     ) -> CallOutcome {
         let metadata = call_target.function_metadata();
+        if let Some(FunctionKind::Synthesized(symbol)) = metadata.map(|meta| &meta.kind)
+            && symbol.name == dunder::INIT
+            && let Some(cls) = &symbol.cls
+        {
+            for keyword in keywords {
+                if let Some(name) = keyword.arg {
+                    self.record_attribute_definition_index(
+                        &Type::ClassDef(*cls),
+                        &name.id,
+                        name.range,
+                        AttributeReferenceKind::KeywordArgument,
+                    );
+                }
+            }
+        }
         if let Some(meta) = metadata
             && meta.flags.is_abstract_method
             && matches!(
@@ -2481,7 +2509,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (ty, _callable, overload_table, argmap) = self.call_overloads(
                     overloads,
                     &metadata,
-                    None,
+                    OverloadReceiver::None,
                     args,
                     keywords,
                     arguments_range,
@@ -2511,7 +2539,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     } else {
                         (overloads.into_vec(), Vec::new())
                     };
-                let (overloads, self_obj) = match Vec1::try_from_vec(accepting) {
+                let (overloads, receiver) = match Vec1::try_from_vec(accepting) {
                     // If the receiver rules out every overload but one, that overload is called
                     // like a non-overloaded method. This bypasses `call_overloads`, so its trace
                     // and its report of a deprecated overload are repeated here.
@@ -2522,6 +2550,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             &overload,
                             arguments_range,
                             true,
+                            TraceReceiver::Present,
                         );
                         self.report_deprecated_overload(
                             &overload.1,
@@ -2543,7 +2572,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             ctor_targs,
                         );
                     }
-                    Ok(accepting) => (accepting, Some(obj)),
+                    Ok(accepting) => (accepting, OverloadReceiver::Bound(obj)),
                     // No overload accepts the receiver. Report it once, as for a non-overloaded
                     // method, and match the arguments as if `self` were bound.
                     Err(_) => {
@@ -2577,13 +2606,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 },
                             )
                         });
-                        (unbound, None)
+                        (unbound, OverloadReceiver::Stripped)
                     }
                 };
                 let (ty, _callable, overload_table, argmap) = self.call_overloads(
                     overloads,
                     &meta,
-                    self_obj,
+                    receiver,
                     args,
                     keywords,
                     arguments_range,
@@ -3111,9 +3140,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             *targs = chosen_targs;
         }
         let (ty, specialization_errors, return_type_errors, argmap, _, overload_table) = chosen_res;
-        if let Ok(errors) = Vec1::try_from_vec(specialization_errors) {
-            self.add_specialization_errors(errors, arguments_range, call_errors, context);
-        }
+        self.add_specialization_errors(
+            specialization_errors,
+            Some(&argmap),
+            arguments_range,
+            call_errors,
+            context,
+        );
         self.add_return_type_resolution_errors(
             return_type_errors,
             arguments_range,
@@ -3894,9 +3927,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .ty
                 }
                 _ if let Some(ret) = self.call_builtin_enumerate(ty, callee.expr, errors) => ret,
-                // `functools.partial(func, ...)` synthesizes the remaining callable instead of the
-                // opaque stub, so calls on the result are checked (see `alt::functools`).
-                _ if matches!(ty, Type::ClassDef(cls) if cls.is(KnownClass::FunctoolsPartial)) =>
+                // Partial application retains the remaining signature; partialmethod stays nominal
+                // until descriptor access (see `alt::functools`).
+                _ if matches!(ty, Type::ClassDef(cls) if cls.is(KnownClass::FunctoolsPartial) || cls.is(KnownClass::FunctoolsPartialMethod)) =>
                 {
                     self.call_functools_partial(
                         ty,

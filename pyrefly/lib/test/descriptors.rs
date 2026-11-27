@@ -8,6 +8,300 @@
 use crate::test::util::TestEnv;
 use crate::testcase;
 
+// Zope copies its getter from a base as a method lookup optimization.
+testcase!(
+    test_copied_self_descriptor_getter,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import Self, assert_type
+
+class Declaration: ...
+
+class InferredGetter:
+    def __get__(self, instance: object | None, owner: type[object]):
+        return self
+
+class ExplicitGetter:
+    def __get__(self, instance: object | None, owner: type[object]) -> Self:
+        return self
+
+class Inherited(Declaration, InferredGetter): ...
+
+class Copied(Declaration, InferredGetter):
+    __get__ = InferredGetter.__get__
+
+class ExplicitCopied(Declaration, ExplicitGetter):
+    __get__ = ExplicitGetter.__get__
+
+class Owner:
+    inherited = Inherited()
+    copied = Copied()
+    explicit = ExplicitCopied()
+
+assert_type(Owner.inherited, Inherited)
+assert_type(Owner().inherited, Inherited)
+assert_type(Owner.copied, Copied)
+assert_type(Owner().copied, Copied)
+assert_type(Owner.explicit, ExplicitCopied)
+assert_type(Owner().explicit, ExplicitCopied)
+"#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/1175
+// Nominal widening can hide a descriptor before it is installed on a class.
+testcase!(
+    test_descriptor_substitution_widening,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import assert_type
+
+class A: ...
+
+class B(A):
+    def __get__(self, instance: object | None, owner: type) -> int:  # E: not assignable to non-descriptor base `A`
+        return 1
+
+def install(value: A) -> None:
+    class C:
+        a: A = value
+    assert_type(C.a, A)
+    assert_type(C().a, A)
+
+value: A = B()
+install(B())
+install(value)
+
+class C:
+    a: A = B()
+    b: B = B()
+
+assert_type(C.a, A)
+assert_type(C.b, int)
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_identity,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import Self, assert_type
+
+class A: ...
+
+class Identity(A):
+    def __get__(self, instance: object | None, owner: type) -> Self:
+        return self
+
+class BaseValue(A):
+    def __get__(self, instance: object | None, owner: type) -> A:
+        return A()
+
+class Descriptor:
+    def __get__(self, instance: object | None, owner: type) -> int:
+        return 1
+
+class C:
+    identity = Identity()
+    base_value = BaseValue()
+    arbitrary = Descriptor()
+
+assert_type(C.identity, Identity)
+assert_type(C().identity, Identity)
+assert_type(C.base_value, A)
+assert_type(C.arbitrary, int)
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_overloads,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import Self, overload
+
+class A: ...
+
+class B(A):
+    @overload
+    def __get__(self, instance: None, owner: type) -> Self: ...  # E: not assignable to non-descriptor base `A`
+    @overload
+    def __get__(self, instance: object, owner: type) -> int: ...
+    def __get__(self, instance: object | None, owner: type) -> Self | int:
+        return self if instance is None else 1
+
+class Safe(A):
+    @overload
+    def __get__(self, instance: None, owner: type) -> Self: ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> A: ...
+    def __get__(self, instance: object | None, owner: type) -> A:
+        return self
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_generic_bases,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+class A[T]:
+    value: T
+
+class Safe[T](A[T]):
+    def __get__(self, instance: object | None, owner: type) -> A[T]:
+        return self
+
+class Wrong(A[str]):
+    def __get__(self, instance: object | None, owner: type) -> A[int]:  # E: not assignable to non-descriptor base `A[str]`
+        return A[int]()
+
+class Bound(A[int]):
+    def __get__[T: A[int]](self, instance: T, owner: type[T]) -> T:
+        return instance
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_inherited_getter,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import Self
+
+class A: ...
+
+class Getter:
+    def __get__(self, instance: object | None, owner: type) -> int:
+        return 1
+
+class B(A, Getter): ...  # E: not assignable to non-descriptor base `A`
+class Reversed(Getter, A): ...  # E: not assignable to non-descriptor base `A`
+
+class Identity:
+    def __get__(self, instance: object | None, owner: type) -> Self:
+        return self
+
+class Safe(A, Identity): ...
+class Descendant(Safe): ...
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_existing_getter,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import Any, Self
+
+class A:
+    def __get__(self, instance: object | None, owner: type) -> int:
+        return 1
+
+class B(A):
+    def __get__(self, instance: object | None, owner: type) -> int:
+        return 2
+
+class Wrong(A):
+    def __get__(self, instance: object | None, owner: type) -> str:  # E: inconsistent
+        return "wrong"
+
+class Plain: ...
+
+class Dynamic(Plain):
+    def __get__(self, instance: object | None, owner: type) -> Any:
+        return 1
+
+class UnknownBase(Any): ...
+
+class UnknownGetter(UnknownBase):
+    def __get__(self, instance: object | None, owner: type) -> int:
+        return 1
+
+class NonCallable(Plain):
+    __get__ = None
+
+class ReturningSelf(Plain):
+    def __get__(self, instance: object | None, owner: type) -> Self:
+        return self
+
+class Incompatible(ReturningSelf):
+    def __get__(self, instance: object | None, owner: type) -> int:  # E: inconsistent
+        return 1
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_class_members,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import Callable
+
+class Plain: ...
+
+class InstanceOnly(Plain):
+    def __init__(self) -> None:
+        self.__get__: Callable[[object | None, type[object]], int] = lambda instance, owner: 1
+
+class AnnotationOnly(Plain):
+    __get__: Callable[[object | None, type[object]], int]
+
+class IntroducesGet(InstanceOnly):
+    def __get__(self, instance: object | None, owner: type[object]) -> int:  # E: inconsistent  # E: non-descriptor base `InstanceOnly`
+        return 1
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_marker_bases,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import Generic, Never, Protocol, TypeVar
+
+T = TypeVar("T")
+
+class GenericDescriptor(Generic[T]):
+    def __get__(self, instance: object | None, owner: type[object]) -> int:
+        return 1
+
+class DescriptorProtocol(Protocol):
+    def __get__(self, instance: object | None, owner: type[object]) -> int: ...
+
+class ObjectDescriptor(object):
+    def __get__(self, instance: object | None, owner: type[object]) -> int:
+        return 1
+
+class Plain: ...
+
+class NeverDescriptor(Plain):
+    def __get__(self, instance: object | None, owner: type[object]) -> Never:
+        raise RuntimeError
+
+class Meta(type):
+    def __get__(self, instance: object | None, owner: type[object]) -> int:  # E: non-descriptor base `type`
+        return 1
+
+class MetaclassOnly(Plain, metaclass=Meta): ...
+"#,
+);
+
+testcase!(
+    test_descriptor_substitution_union_and_diamond,
+    TestEnv::new().enable_bad_descriptor_inheritance_error(),
+    r#"
+from typing import assert_type
+
+class A: ...
+class Left(A): ...
+class Right(A): ...
+
+class B(Left, Right):
+    def __get__(self, instance: object | None, owner: type[object]) -> A | int:  # E: non-descriptor base `Left`  # E: non-descriptor base `Right`
+        return 1
+
+class C:
+    value: A = B()
+
+assert_type(C.value, A)
+assert_type(C().value, A)
+"#,
+);
+
 testcase!(
     test_property_subclass_nominal_class_access,
     r#"
@@ -172,7 +466,7 @@ testcase!(
 from typing import assert_type
 class C:
     @classmethod
-    def foo(cls: type[C]) -> int:
+    def foo(cls: "type[C]") -> int:
         return 42
 def f(c: C):
     assert_type(C.foo(), int)
@@ -211,10 +505,9 @@ def f(c: C):
 
 // https://github.com/pyrefly-org/pyrefly/issues/5519
 testcase!(
-    bug = "Property subclasses lose the getter type",
     test_property_subclass_read_only,
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 
 class Property(property):
     def describe(self) -> str:
@@ -227,19 +520,18 @@ class C:
 
 class Child(C): ...
 
-assert_type(C().value, Any)
-assert_type(Child().value, Any)
+assert_type(C().value, int)
+assert_type(Child().value, int)
 assert_type(C.value.describe(), str)
 assert_type(Child.value.describe(), str)
-C().value = 2
+C().value = 2  # E: read-only property and cannot be set
     "#,
 );
 
 testcase!(
-    bug = "Property subclasses lose the getter type",
     test_property_subclass_inheritance,
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 
 class Property(property): ...
 class Mixin: ...
@@ -254,17 +546,16 @@ class C[T]:
 
 class Child(C[int]): ...
 
-assert_type(C[int]().value, Any)
-assert_type(C[str]().value, Any)
-assert_type(Child().value, Any)
+assert_type(C[int]().value, int)
+assert_type(C[str]().value, str)
+assert_type(Child().value, int)
     "#,
 );
 
 testcase!(
-    bug = "Property subclasses lose accessor types",
     test_property_subclass_setter_and_deleter,
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 
 class Property(property):
     def describe(self) -> str:
@@ -284,19 +575,18 @@ class C:
         pass
 
 c = C()
-assert_type(c.value, Any)
-C.value.describe()  # E: Object of class `property` has no attribute `describe`
+assert_type(c.value, int)
+assert_type(C.value.describe(), str)
 c.value = 2
-c.value = "wrong"
+c.value = "wrong"  # E: `Literal['wrong']` is not assignable to parameter `new_value` with type `int`
 del c.value
     "#,
 );
 
 testcase!(
-    bug = "Property subclass constructors lose accessor types",
     test_property_subclass_constructor,
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 
 class Property(property):
     def describe(self) -> str:
@@ -317,19 +607,18 @@ class C:
     writable = DerivedProperty(fget=get_value, fset=set_value, fdel=del_value)
 
 c = C()
-assert_type(c.read_only, Any)
-assert_type(c.writable, Any)
+assert_type(c.read_only, int)
+assert_type(c.writable, int)
 assert_type(C.read_only.describe(), str)
 assert_type(C.writable.describe(), str)
-c.read_only = 2
+c.read_only = 2  # E: read-only property and cannot be set
 c.writable = 2
-c.writable = "wrong"
+c.writable = "wrong"  # E: `Literal['wrong']` is not assignable to parameter `value` with type `int`
 del c.writable
     "#,
 );
 
 testcase!(
-    bug = "Imported property subclasses lose the getter type",
     test_property_subclass_imported,
     {
         let mut env = TestEnv::new();
@@ -340,7 +629,7 @@ testcase!(
         env
     },
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 from lib import DerivedProperty
 
 class C:
@@ -348,7 +637,7 @@ class C:
     def value(self) -> str:
         return "value"
 
-assert_type(C().value, Any)
+assert_type(C().value, str)
     "#,
 );
 
@@ -490,10 +779,9 @@ assert_type(C().value, Any)
 );
 
 testcase!(
-    bug = "Specialized property subclasses lose the getter type",
     test_property_subclass_specialized,
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 
 class Property[T](property):
     def result_type(self) -> type[T]:
@@ -504,7 +792,7 @@ class C:
     def value(self) -> int:
         return 1
 
-assert_type(C().value, Any)
+assert_type(C().value, int)
 assert_type(C.value.result_type(), type[int])
     "#,
 );
@@ -1622,10 +1910,10 @@ _StorageT = TypeVar("_StorageT", bound=Storage | None, default=None)
 
 class _CatStorageDescriptor:
     @overload
-    def __get__(self, instance: Cat[None], owner: type[Cat[None]]) -> Storage: ...
+    def __get__(self, instance: "Cat[None]", owner: "type[Cat[None]]") -> Storage: ...
     @overload
     def __get__(
-        self, instance: Cat[StorageT], owner: type[Cat[StorageT]]
+        self, instance: "Cat[StorageT]", owner: "type[Cat[StorageT]]"
     ) -> StorageT: ...
 
     def __get__(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -1650,10 +1938,10 @@ class Polars: ...
 
 class ImplDescriptor:
     @overload
-    def __get__(self, instance: Frame[Polars], owner: Any) -> Literal["polars"]: ...
+    def __get__(self, instance: "Frame[Polars]", owner: Any) -> Literal["polars"]: ...
     @overload
-    def __get__(self, instance: Frame[Pandas], owner: Any) -> Literal["pandas"]: ...
-    def __get__(self, instance: Frame[Any], owner: Any) -> Any: ...
+    def __get__(self, instance: "Frame[Pandas]", owner: Any) -> Literal["pandas"]: ...
+    def __get__(self, instance: "Frame[Any]", owner: Any) -> Any: ...
 
 class Frame[T]:
     impl: ImplDescriptor = ImplDescriptor()
@@ -1809,7 +2097,7 @@ testcase!(
     test_self_referential_descriptor_get_no_crash,
     r#"
 class C:
-    def d() -> C: ...  # E: Instance method `d` must accept the instance as its first positional parameter
+    def d() -> "C": ...  # E: Instance method `d` must accept the instance as its first positional parameter
     @d  # E: Expected 0 positional arguments, got 1 in function `C.d`
     def __get__():
         pass
@@ -1945,7 +2233,7 @@ class JitDeco[**P, R](Protocol):
     def __get__(self, obj: None, owner: type, /) -> Self: ...
     @overload
     def __get__[ObjT, **P1, R1](
-        self: JitDeco[Concatenate[ObjT, P1], R1],
+        self: "JitDeco[Concatenate[ObjT, P1], R1]",
         obj: ObjT,
         owner: type | None = None,
         /,
@@ -1968,7 +2256,7 @@ testcase!(
     test_self_referential_descriptor_set_no_crash,
     r#"
 class C:
-    def d() -> C: ...  # E: Instance method `d` must accept the instance as its first positional parameter
+    def d() -> "C": ...  # E: Instance method `d` must accept the instance as its first positional parameter
     @d  # E: Expected 0 positional arguments, got 1 in function `C.d`
     def __get__():
         pass

@@ -7843,7 +7843,7 @@ impl TspInterface for Server {
                             transaction
                                 .get_computed_type_at_range(handle, TextRange::new(start, end))
                         }?;
-                        Some(type_fact(transaction, handle, &ty))
+                        Some(type_fact(transaction, handle, &ty, query.members))
                     })
                     .collect();
                 Some(facts)

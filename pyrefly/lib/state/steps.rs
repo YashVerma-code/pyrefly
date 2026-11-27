@@ -73,6 +73,7 @@ pub struct Context<'a, Lookup> {
     pub strict_partial_subtyping: bool,
     pub spec_compliant_overloads: bool,
     pub legacy_overload_expansion: bool,
+    pub legacy_generator_send_type: bool,
     pub treat_all_caps_as_final: bool,
     pub infer_param_types_from_docstring: bool,
     pub reveal_type_qualified_names: bool,
@@ -530,6 +531,8 @@ impl Step {
         let module_ranges = (load.error_style != ErrorStyle::Never).then(|| {
             let module_ranges = ModuleRanges::compute(&module, &load.module_info);
             errors.add_misplaced_ignores(&module_ranges.misplaced_ignore_all);
+            errors.add_invalid_ignores();
+            errors.add_ignore_without_code();
             Arc::new(module_ranges)
         });
         Arc::new(ParsedModule::new(
@@ -571,6 +574,7 @@ impl Step {
             strict_partial_subtyping: ctx.strict_partial_subtyping,
             spec_compliant_overloads: ctx.spec_compliant_overloads,
             legacy_overload_expansion: ctx.legacy_overload_expansion,
+            legacy_generator_send_type: ctx.legacy_generator_send_type,
             reveal_type_qualified_names: ctx.reveal_type_qualified_names,
         });
         let enable_index = ctx.require.keep_index();

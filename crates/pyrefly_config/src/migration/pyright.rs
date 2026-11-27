@@ -8,10 +8,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::Context as _;
 use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_util::globs::Glob;
 use pyrefly_util::globs::Globs;
 use serde::Deserialize;
+use serde_json::Value;
 use serde_with::FromInto;
 use serde_with::serde_as;
 
@@ -40,7 +42,7 @@ impl ExecEnv {
             ..Default::default()
         };
         Ok(SubConfig {
-            matches: Glob::new(self.root)?,
+            matches: Glob::new(self.root)?.into(),
             settings,
         })
     }
@@ -99,8 +101,45 @@ use crate::migration::sub_configs::SubConfigs;
 use crate::migration::type_checking_mode;
 
 impl PyrightConfig {
-    pub fn parse(text: &str) -> anyhow::Result<Self> {
-        Ok(serde_jsonrc::from_str::<Self>(text)?)
+    pub(super) fn parse_json(text: &str, basedpyright: Option<bool>) -> anyhow::Result<Self> {
+        let mut config: Self = serde_jsonrc::from_str(text)?;
+        if let Some(basedpyright) = basedpyright {
+            config.is_basedpyright = basedpyright;
+            return Ok(config);
+        }
+        // Some BasedPyright-only keys have no Pyrefly equivalent and are not
+        // retained by the typed parser.
+        let raw: Value = serde_jsonrc::from_str(text)?;
+        let has_basedpyright_rule = |settings: &Value| {
+            [
+                "reportAny",
+                "reportEmptyAbstractUsage",
+                "reportExplicitAny",
+                "reportIgnoreCommentWithoutRule",
+                "reportImplicitAbstractClass",
+                "reportImplicitRelativeImport",
+                "reportIncompatibleUnannotatedOverride",
+                "reportInvalidAbstractMethod",
+                "reportInvalidCast",
+                "reportPrivateLocalImportUsage",
+                "reportUnannotatedClassAttribute",
+                "reportUnsafeMultipleInheritance",
+            ]
+            .iter()
+            .any(|key| settings.get(*key).is_some())
+        };
+        config.is_basedpyright = matches!(
+            config.type_checking_mode,
+            Some(TypeCheckingMode::Recommended | TypeCheckingMode::All)
+        ) || ["allowedUntypedLibraries", "baselineFile", "failOnWarnings"]
+            .iter()
+            .any(|key| raw.get(*key).is_some())
+            || has_basedpyright_rule(&raw)
+            || raw
+                .get("executionEnvironments")
+                .and_then(Value::as_array)
+                .is_some_and(|envs| envs.iter().any(has_basedpyright_rule));
+        Ok(config)
     }
 
     pub fn convert(self) -> ConfigFile {
@@ -129,6 +168,9 @@ impl PyrightConfig {
 
         // Pyright does not infer empty container types and unsolved type variables based on their first use.
         cfg.root.infer_with_first_use = Some(false);
+        if !self.is_basedpyright {
+            cfg.root.legacy_generator_send_type = Some(true);
+        }
 
         cfg
     }
@@ -199,6 +241,10 @@ impl From<DiagnosticLevelOrBool> for Severity {
 pub struct RuleOverrides {
     // Import rules
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_import_cycles: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_unused_import: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_missing_imports: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_missing_module_source: Option<Severity>,
@@ -214,6 +260,16 @@ pub struct RuleOverrides {
     pub report_any: Option<Severity>,
 
     // Abstract/instantiation rules
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_invalid_abstract_method: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_unsafe_multiple_inheritance: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_implicit_abstract_class: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_empty_abstract_usage: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_inconsistent_constructor: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_abstract_usage: Option<Severity>,
 
@@ -255,6 +311,8 @@ pub struct RuleOverrides {
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_typed_dict_not_required_access: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_property_type_mismatch: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_private_usage: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_deprecated: Option<Severity>,
@@ -264,6 +322,8 @@ pub struct RuleOverrides {
     pub report_incompatible_variable_override: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_possibly_unbound_variable: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_missing_super_call: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_uninitialized_instance_variable: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
@@ -292,6 +352,10 @@ pub struct RuleOverrides {
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_unnecessary_is_instance: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_invalid_cast: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_unnecessary_type_ignore_comment: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_unnecessary_cast: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_unnecessary_comparison: Option<Severity>,
@@ -307,14 +371,19 @@ pub struct RuleOverrides {
 
     // Name/variable rules
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_unused_variable: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_unused_parameter: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_undefined_variable: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_unbound_variable: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
-    #[expect(unused)]
     pub report_unhashable: Option<Severity>,
 
     // Coroutine rules
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_unused_call_result: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_unused_coroutine: Option<Severity>,
 
@@ -344,6 +413,8 @@ pub struct RuleOverrides {
     // Match/reachability rules
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_match_not_exhaustive: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_unused_except: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_unreachable: Option<Severity>,
 
@@ -376,6 +447,8 @@ impl RuleOverrides {
         // For each ErrorKind, there are one or more RuleOverrides fields.
         // The ErrorDisplayConfig map has an entry for an ErrorKind if at least one of the RuleOverrides for that ErrorKind is present.
         // The value of that ErrorKind's entry is found by or'ing together the present RuleOverrides.
+        add(self.report_import_cycles, ErrorKind::ImportCycle);
+        add(self.report_unused_import, ErrorKind::UnusedImport);
         add(self.report_missing_imports, ErrorKind::MissingImport);
         add(self.report_missing_module_source, ErrorKind::MissingSource);
         add(
@@ -394,6 +467,27 @@ impl RuleOverrides {
         add(self.report_explicit_any, ErrorKind::ExplicitAny);
         add(self.report_any, ErrorKind::ExplicitAnyUse);
         add(self.report_any, ErrorKind::AnyFunctionDecorator);
+        add(
+            self.report_invalid_abstract_method,
+            ErrorKind::InvalidAbstractMethod,
+        );
+        add(
+            self.report_unsafe_multiple_inheritance,
+            ErrorKind::UnsafeMultipleInheritance,
+        );
+        add(
+            self.report_implicit_abstract_class,
+            ErrorKind::ImplicitAbstractClass,
+        );
+        add(
+            self.report_empty_abstract_usage,
+            ErrorKind::DirectAbstractBaseInstantiation,
+        );
+        add(
+            self.report_inconsistent_constructor,
+            ErrorKind::InconsistentConstructor,
+        );
+        add(self.report_abstract_usage, ErrorKind::AbstractMethodCall);
         add(self.report_abstract_usage, ErrorKind::BadInstantiation);
         add(self.report_argument_type, ErrorKind::BadArgumentType);
         add(self.report_argument_type, ErrorKind::InvalidArgument);
@@ -434,6 +528,11 @@ impl RuleOverrides {
         add(self.report_return_type, ErrorKind::BadReturn);
         add(self.report_return_type, ErrorKind::InvalidYield);
         add(self.report_private_usage, ErrorKind::ProtectedAccess);
+        add(self.report_missing_super_call, ErrorKind::MissingSuperCall);
+        add(
+            self.report_property_type_mismatch,
+            ErrorKind::PropertyTypeMismatch,
+        );
         add(self.report_deprecated, ErrorKind::Deprecated);
         add(
             self.report_incompatible_method_override,
@@ -450,6 +549,10 @@ impl RuleOverrides {
         add(
             self.report_uninitialized_instance_variable,
             ErrorKind::ImplicitlyDefinedAttribute,
+        );
+        add(
+            self.report_uninitialized_instance_variable,
+            ErrorKind::UninitializedInstanceVariable,
         );
         add(
             self.report_unknown_parameter_type,
@@ -497,13 +600,30 @@ impl RuleOverrides {
             ErrorKind::UnknownReturnType,
         );
         add(self.report_unknown_lambda_type, ErrorKind::UnknownFromError);
+        add(
+            self.report_invalid_type_var_use,
+            ErrorKind::VarianceMismatch,
+        );
         add(self.report_invalid_type_var_use, ErrorKind::InvalidTypeVar);
+        add(self.report_invalid_cast, ErrorKind::InvalidCast);
+        add(
+            self.report_unnecessary_type_ignore_comment,
+            ErrorKind::UnusedTypeIgnore,
+        );
         add(self.report_unnecessary_cast, ErrorKind::RedundantCast);
+        add(self.report_unused_variable, ErrorKind::UnusedVariable);
+        add(self.report_unused_parameter, ErrorKind::UnusedParameter);
         add(self.report_undefined_variable, ErrorKind::UnknownName);
         add(self.report_unbound_variable, ErrorKind::UnboundName);
+        add(self.report_unhashable, ErrorKind::Unhashable);
+        add(self.report_unused_call_result, ErrorKind::UnusedCallResult);
         add(self.report_unused_coroutine, ErrorKind::UnusedCoroutine);
 
         // Call rules
+        add(
+            self.report_call_issue,
+            ErrorKind::PotentialBadKeywordArgument,
+        );
         add(self.report_call_issue, ErrorKind::MissingArgument);
         add(self.report_call_issue, ErrorKind::BadArgumentCount);
         add(
@@ -599,6 +719,10 @@ impl RuleOverrides {
             self.report_match_not_exhaustive,
             ErrorKind::NonExhaustiveMatch,
         );
+        add(
+            self.report_unused_except,
+            ErrorKind::UnreachableExceptClause,
+        );
         add(self.report_unreachable, ErrorKind::Unreachable);
         add(self.report_unreachable, ErrorKind::UnreachableExceptClause);
         add(self.report_unreachable, ErrorKind::UnreachableMatchCase);
@@ -678,6 +802,24 @@ pub fn parse_pyproject_toml(raw_file: &str) -> anyhow::Result<PyrightConfig> {
     }
 }
 
+/// Parse the explicitly selected section without interpreting other checkers' settings.
+pub(super) fn parse_pyproject_section(
+    raw_file: &str,
+    section: &str,
+) -> anyhow::Result<PyrightConfig> {
+    let mut doc: toml::Table = toml::from_str(raw_file)?;
+    let settings = doc
+        .get_mut("tool")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|tool| tool.remove(section))
+        .with_context(|| format!("No [tool.{section}] section found in pyproject.toml"))?;
+    let mut config: PyrightConfig = settings
+        .try_into()
+        .with_context(|| format!("While parsing [tool.{section}]"))?;
+    config.is_basedpyright = section == "basedpyright";
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -737,6 +879,7 @@ mod tests {
                 },
                 root: ConfigBase {
                     infer_with_first_use: Some(false),
+                    legacy_generator_send_type: Some(true),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -786,6 +929,7 @@ mod tests {
                 },
                 root: ConfigBase {
                     infer_with_first_use: Some(false),
+                    legacy_generator_send_type: Some(true),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -823,6 +967,7 @@ executionEnvironments = [
 "#;
         let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.root.preset, None);
+        assert_eq!(result.root.legacy_generator_send_type, Some(true));
     }
 
     #[test]
@@ -831,6 +976,7 @@ executionEnvironments = [
 "#;
         let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.root.preset, Some(Preset::All));
+        assert_eq!(result.root.legacy_generator_send_type, None);
     }
 
     #[test]
@@ -960,6 +1106,15 @@ include = ["basedpyright.py"]
             let config = serde_json::from_str::<PyrightConfig>(&raw)?.convert();
             assert!(config.root.errors.is_none());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_unhashable_mapping() -> anyhow::Result<()> {
+        let pyr = serde_json::from_str::<PyrightConfig>(r#"{"reportUnhashable": "error"}"#)?;
+        let config = pyr.convert();
+        let errors = config.root.errors.expect("expected a diagnostic override");
+        assert_eq!(errors.severity(ErrorKind::Unhashable), Severity::Error);
         Ok(())
     }
 }

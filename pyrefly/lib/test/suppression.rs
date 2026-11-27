@@ -12,6 +12,39 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_invalid_ignore_syntax_collection,
+    r#"
+x: int = ""  # pyrefly: ignoree  # E: is not assignable  # E: Invalid ignore comment
+x = 1  # pyrefly: ignore[]  # E: Empty error-code list
+x = 1  # pyrefly: ignore[,]  # E: Empty error-code list
+x = 1  # pyrefly: ignore[bad-assignment  # E: Unterminated
+"#,
+);
+
+testcase!(
+    test_ignore_prefix_type_alias_comments,
+    r#"
+ignore1 = int
+ignoree = int
+ignored_type = int
+x = 1  # type:ignore1
+x = 1  # type: ignoree
+x = 1  # type: ignored_type
+"#,
+);
+
+testcase!(
+    test_invalid_ignore_disabled_tool_preserves_unknown,
+    TestEnv::new().enable_unknown_from_error_error(),
+    r#"
+from _no_such_module import f  # E: Cannot find module
+x = f(  # E: unknown because it comes from an error
+    # pyright: ignoree
+)
+"#,
+);
+
+testcase!(
     test_pyrefly_suppression,
     r#"
 def foo() -> str:
@@ -166,7 +199,7 @@ testcase!(
     test_pyrefly_suppression_typed_empty,
     r#"
 def foo() -> str:
-  # pyrefly: ignore[]
+  # pyrefly: ignore[]  # E: Empty error-code list
   return 1 # E: Returned type `Literal[1]` is not assignable to declared return type `str`
 "#,
 );

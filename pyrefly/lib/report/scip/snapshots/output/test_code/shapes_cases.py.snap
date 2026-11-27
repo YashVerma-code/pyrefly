@@ -1,0 +1,54 @@
+# < definition scip-python python snapshot-util 0.1 shapes_cases/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# pytest does not collect tests from this module, so only its `unittest.TestCase`
+# subclasses are test code.
+import unittest
+#      ^^^^^^^^ reference  python-stdlib 3.13 unittest/__init__:
+
+from shapes import area
+#    ^^^^^^ reference  snapshot-util 0.1 shapes/__init__:
+#                  ^^^^ reference  snapshot-util 0.1 shapes/area().
+
+
+class ShapesCase(unittest.TestCase):
+#     ^^^^^^^^^^ definition test  snapshot-util 0.1 shapes_cases/ShapesCase#
+#     relationship implementation scip-python python python-stdlib 3.13 `unittest.case`/TestCase#
+#                ^^^^^^^^ reference test  python-stdlib 3.13 unittest/__init__:
+#                         ^^^^^^^^ reference test  python-stdlib 3.13 `unittest.case`/TestCase#
+    def assert_area(self, width: int, height: int, expected: int) -> None:
+#       ^^^^^^^^^^^ definition test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().
+#                   ^^^^ definition test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(self)
+#                         ^^^^^ definition test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(width)
+#                                ^^^ reference test  python-stdlib 3.13 builtins/int#
+#                                     ^^^^^^ definition test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(height)
+#                                             ^^^ reference test  python-stdlib 3.13 builtins/int#
+#                                                  ^^^^^^^^ definition test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(expected)
+#                                                            ^^^ reference test  python-stdlib 3.13 builtins/int#
+        self.assertEqual(area(width, height), expected)
+#       ^^^^ reference test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(self)
+#            ^^^^^^^^^^^ reference test  python-stdlib 3.13 `unittest.case`/TestCase#assertEqual().
+#                        ^^^^ reference test  snapshot-util 0.1 shapes/area().
+#                             ^^^^^ reference test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(width)
+#                                    ^^^^^^ reference test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(height)
+#                                             ^^^^^^^^ reference test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().(expected)
+
+
+class TestNotACase:
+#     ^^^^^^^^^^^^ definition  snapshot-util 0.1 shapes_cases/TestNotACase#
+    def test_nothing(self) -> None:
+#       ^^^^^^^^^^^^ definition  snapshot-util 0.1 shapes_cases/TestNotACase#test_nothing().
+#                    ^^^^ definition  snapshot-util 0.1 shapes_cases/TestNotACase#test_nothing().(self)
+        pass
+
+
+def shape_names() -> list[str]:
+#   ^^^^^^^^^^^ definition  snapshot-util 0.1 shapes_cases/shape_names().
+#                    ^^^^ reference  python-stdlib 3.13 builtins/list#
+#                         ^^^ reference  python-stdlib 3.13 builtins/str#
+    return ["square"]
+

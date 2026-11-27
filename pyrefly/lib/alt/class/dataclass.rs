@@ -28,6 +28,7 @@ use crate::alt::callable::CallKeyword;
 use crate::alt::class::attrs::AttrsInitName;
 use crate::alt::class::class_field::ClassField;
 use crate::alt::class::class_field::DataclassMember;
+use crate::alt::overload::OverloadReceiver;
 use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassSynthesizedField;
 use crate::alt::types::class_metadata::ClassSynthesizedFields;
@@ -57,6 +58,7 @@ use crate::types::display::ClassDisplayContext;
 use crate::types::function::FuncMetadata;
 use crate::types::function::Function;
 use crate::types::keywords::ConverterMap;
+use crate::types::keywords::DataclassFieldDefault;
 use crate::types::keywords::DataclassFieldKeywords;
 use crate::types::keywords::TypeMap;
 use crate::types::literal::Lit;
@@ -598,6 +600,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 kws,
                 errors,
                 None,
+                true,
             );
             ret.unwrap_or_else(|| ty.clone())
         });
@@ -721,7 +724,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 params.push(self.as_param(
                     &field,
                     &param_name,
-                    has_default,
+                    has_default.then_some(DataclassFieldDefault::Unknown),
                     true,
                     strict,
                     field_flags.converter_param.clone(),
@@ -732,7 +735,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 params.push(self.as_param(
                     &field,
                     alias,
-                    has_default,
+                    has_default.then_some(DataclassFieldDefault::Unknown),
                     true,
                     strict,
                     field_flags.converter_param.clone(),
@@ -822,7 +825,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut params = Vec::new();
         for (name, field, _) in self.iter_fields(cls, dataclass_metadata, true, &kw_only_by_class) {
             if field.is_init_var() {
-                params.push(self.as_param(&field, &name, false, false, true, None, &|ty| ty));
+                params.push(self.as_param(&field, &name, None, false, true, None, &|ty| ty));
             }
         }
         let want = self.heap.mk_callable_from(Callable::list(
@@ -852,16 +855,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         }
         let mut init = map.get_bool(&DataclassFieldKeywords::INIT);
-        let mut default = self.get_default(&map);
-
-        if default.is_none()
-            && dataclass_metadata.default_can_be_positional
-            && let Some(default_expr) = args.args.first()
-            && !matches!(default_expr, EllipsisLiteral(_))
-        {
-            // Check whether a default was passed positionally. This is needed for `pydantic.Field`.
-            default = Some(self.expr_infer(default_expr, errors));
-        }
+        let default = self.specifier_field_default(
+            args,
+            &map,
+            dataclass_metadata,
+            annotated_field_ty,
+            errors,
+        );
 
         let mut kw_only = map.get_bool(&DataclassFieldKeywords::KW_ONLY);
 
@@ -954,6 +954,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             converter_param,
             attrs_setattr_frozen,
             pydantic_has_custom_schema: false,
+            dagster_rewritten_annotation: false,
         }
     }
 
@@ -995,7 +996,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }))
                 .unwrap(),
                 &overload.metadata,
-                None,
+                OverloadReceiver::None,
                 &args.args.map(CallArg::expr_maybe_starred),
                 &args.keywords.map(CallKeyword::new),
                 args.range,
@@ -1018,7 +1019,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     | Param::KwOnly(name, ty, Required::Required) => (name, ty, None),
                     Param::Pos(name, ty, Required::Optional(default))
                     | Param::KwOnly(name, ty, Required::Optional(default)) => {
-                        (name, ty, default.as_ref().map(|d| &d.ty))
+                        (name, ty, default.as_ref().and_then(|d| d.ty.as_ref()))
                     }
                     _ => continue,
                 };
@@ -1151,22 +1152,45 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Some(self.solver().expand(instantiated, self))
     }
 
-    fn get_default(&self, map: &TypeMap) -> Option<Type> {
-        if let Some(default) = map.0.get(&DataclassFieldKeywords::DEFAULT) {
-            return Some(default.clone());
+    /// Default from `default=`, a positional default, or `default_factory`/`factory`.
+    fn specifier_field_default(
+        &self,
+        args: &Arguments,
+        map: &TypeMap,
+        dataclass_metadata: &DataclassMetadata,
+        annotated: Option<&Type>,
+        errors: &ErrorCollector,
+    ) -> Option<DataclassFieldDefault> {
+        if let Some(kw) = args.keywords.iter().find(|kw| {
+            kw.arg
+                .as_ref()
+                .is_some_and(|name| name.id == DataclassFieldKeywords::DEFAULT)
+        }) {
+            // The keyword loop already reported errors for this expression.
+            return Some(self.field_default_for_expr(
+                &kw.value,
+                annotated,
+                &self.error_swallower(),
+            ));
+        }
+        if dataclass_metadata.default_can_be_positional
+            && let Some(default_expr) = args.args.first()
+            && !matches!(default_expr, EllipsisLiteral(_))
+        {
+            return Some(self.field_default_for_expr(default_expr, annotated, errors));
         }
         let factory = map
             .0
             .get(&DataclassFieldKeywords::DEFAULT_FACTORY)
             .or_else(|| map.0.get(&DataclassFieldKeywords::FACTORY))?;
         let constructor_callable = self.constructor_to_callable_distributed(factory);
-        Some(
+        Some(DataclassFieldDefault::Factory(
             constructor_callable
                 .as_ref()
                 .unwrap_or(factory)
                 .callable_return_type(self.heap, self)
                 .unwrap_or_else(|| self.heap.mk_any_implicit()),
-        )
+        ))
     }
 
     pub fn compute_kw_only_fields_by_class(&self, cls: &Class) -> SmallMap<Class, SmallSet<Name>> {
@@ -1320,8 +1344,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Pydantic models (BaseModel/RootModel/BaseSettings) do not honor `Field(init=False)`:
         // the field still appears in the validator-driven `__init__`.
         // Pydantic dataclasses and stdlib/attrs dataclasses follow the behavior of built-in dataclasses.
+        let metadata = self.get_metadata_for_class(cls);
         let init_arg_should_be_ignored = matches!(
-            self.get_metadata_for_class(cls).pydantic_model_kind(),
+            metadata.pydantic_model_kind(),
             Some(
                 PydanticModelKind::BaseModel
                     | PydanticModelKind::RootModel
@@ -1336,6 +1361,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let has_default = force_optional
                     || field_flags.default.is_some()
                     || (field_flags.init_by_name && field_flags.init_by_alias.is_some());
+                let default_ty = has_default.then(|| {
+                    field_flags
+                        .default
+                        .clone()
+                        .unwrap_or(DataclassFieldDefault::Unknown)
+                });
                 let is_kw_only = field_flags.is_kw_only();
                 if !is_kw_only {
                     if !has_default && has_seen_default {
@@ -1385,10 +1416,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // `__replace__` also read it, and assignment must still enforce
                     // the declared type.
                     || field_flags.pydantic_has_custom_schema
+                    || (strict
+                        && metadata.is_pydantic_model()
+                        && field_flags.converter_param.is_none()
+                        && self.pydantic_type_has_custom_schema(&field.ty()))
                 {
                     Some(self.heap.mk_any_explicit())
+                } else if field_flags.dagster_rewritten_annotation
+                    && field_flags.converter_param.is_none()
+                    && let Some(ty) = self.get_dagster_init_field_type(&field.ty())
+                {
+                    Some(ty)
                 } else if dataclass.is_pydantic_lax_field(&name, &field_flags) {
                     converter_table.get(&field.ty()).cloned()
+                } else if metadata.is_pydantic_model() && field_flags.converter_param.is_none() {
+                    // Pydantic validates against the field annotation, not the descriptor's
+                    // setter. Strict checking retains the annotation's generic arguments.
+                    Some(field.ty())
                 } else {
                     field_flags.converter_param.clone()
                 };
@@ -1417,7 +1461,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     params.push(self.as_param(
                         &field,
                         &param_name,
-                        has_default,
+                        default_ty.clone(),
                         is_kw_only,
                         strict,
                         converter_param.clone(),
@@ -1428,7 +1472,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     params.push(self.as_param(
                         &field,
                         alias,
-                        has_default,
+                        default_ty,
                         is_kw_only,
                         strict,
                         converter_param,

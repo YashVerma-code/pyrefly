@@ -359,7 +359,7 @@ class Box[**P]:
         self.callback = callback
 
     def replace[**Q](
-        self: Box[Concatenate[int, Q]],
+        self: "Box[Concatenate[int, Q]]",
         callback: Callable[Concatenate[int, Q], None],
     ) -> None:
         self.callback = callback
@@ -955,7 +955,7 @@ testcase!(
 from typing import Concatenate, reveal_type
 
 class A[**P]:
-    def transform(self) -> A[Concatenate[int, P]]:
+    def transform(self) -> "A[Concatenate[int, P]]":
         raise NotImplementedError
 
 reveal_type(A[int]().transform())  # E: revealed type: A[[int, int]]

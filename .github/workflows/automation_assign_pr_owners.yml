@@ -1,10 +1,11 @@
 name: "Automation: Assign PR owners"
 
-# Nightly sweep that assigns a Pyrefly team engineer (from .github/owners.json)
-# to open PRs that have no assignee and are labeled "waiting-for-reviewer" (by
-# automation_pr_state.yml). It prefers an owner whose review was requested, then
-# the owner who reviewed most recently, then a round robin whose starting owner
-# rotates daily. The picked owner is both assigned and requested as a reviewer
+# Nightly sweep that assigns a Pyrefly team engineer (an entry in
+# .github/owners.json with "reviews": true) to open PRs that have no assignee
+# and are labeled "waiting-for-reviewer" (by automation_pr_state.yml). It
+# prefers an owner whose review was requested, then the owner who reviewed most
+# recently, then a round robin whose starting owner rotates daily. The picked
+# owner is both assigned and requested as a reviewer
 # so the PR shows up in their review queue.
 #
 # Scheduled runs assign for real. A manual run from the Actions tab exposes a
@@ -40,28 +41,17 @@ jobs:
             const dryRun = (context.payload.inputs && context.payload.inputs.dry_run) === 'true';
             const { owner, repo } = context.repo;
 
-            // Pyrefly team GitHub handles — single source of truth in
-            // .github/owners.json. Lower-cased for case-insensitive matching.
+            // Only Pyrefly team members marked `"reviews": true` in
+            // .github/owners.json receive sweep assignments. Lower-cased for
+            // case-insensitive matching.
             const ownersFile = await github.rest.repos.getContent({
               owner, repo, path: '.github/owners.json',
             });
-            const owners = JSON.parse(
+            const assignable = Object.entries(JSON.parse(
               Buffer.from(ownersFile.data.content, 'base64').toString('utf8'),
-            ).map((o) => o.toLowerCase());
-            if (owners.length === 0) {
-              console.log('owners.json is empty, nothing to assign');
-              return;
-            }
-
-            // Round-robin pool = owners minus intentionally non-assignable
-            // members: managers, hands-off maintainers, and anyone not
-            // responsible for reviewing PRs. They stay in owners.json (still
-            // team members for automation_new_pr.yml) but never receive sweep
-            // assignments.
-            const NOT_ASSIGNABLE = new Set(['lolpack', 'ndmitchell', 'javabster', 'grievejia']);
-            const assignable = owners.filter((o) => !NOT_ASSIGNABLE.has(o));
+            )).filter(([, o]) => o.reviews).map(([login]) => login.toLowerCase());
             if (assignable.length === 0) {
-              console.log('No assignable owners after exclusions, nothing to assign');
+              console.log('No owners have "reviews": true, nothing to assign');
               return;
             }
 

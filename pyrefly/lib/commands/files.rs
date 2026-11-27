@@ -100,8 +100,9 @@ pub struct FilesArgs {
     /// Files given explicitly are still checked.
     #[arg(long)]
     exclude_scripts: bool,
-    /// Skip the files and directories given explicitly that the `project-excludes` of their config
-    /// exclude, as `pyrefly check` with no paths does.
+    /// Skip the files and directories given explicitly that `pyrefly check` with no paths would not
+    /// check: those that the `project-excludes` of their config match, and files that its
+    /// `project-includes` do not match.
     #[arg(long)]
     force_exclude: bool,
 
@@ -736,7 +737,8 @@ impl FilesArgs {
             )?
         };
         let force_excluded = if self.force_exclude {
-            // Each path gets the excludes that project mode gives its config.
+            // Each path is skipped if project mode for its config would not check it. A
+            // directory runs project mode, which applies the includes to the files under it.
             let mut config_globs: SmallMap<ArcId<ConfigFile>, FilteredGlobs> = SmallMap::new();
             explicit_paths
                 .into_iter()
@@ -745,15 +747,16 @@ impl FilesArgs {
                         ModuleNameWithKind::guaranteed(ModuleName::unknown()),
                         &ModulePath::filesystem(path.clone()),
                     );
-                    config_globs
-                        .entry(config.dupe())
-                        .or_insert_with(|| {
-                            let mut globs =
-                                config.get_filtered_globs(project_excludes.clone(), scope);
-                            globs.add_excludes(extend_project_excludes.globs());
-                            globs
-                        })
-                        .is_excluded(path)
+                    let globs = config_globs.entry(config.dupe()).or_insert_with(|| {
+                        let mut globs = config.get_filtered_globs(project_excludes.clone(), scope);
+                        globs.add_excludes(extend_project_excludes.globs());
+                        globs
+                    });
+                    if explicit_files.contains(path) {
+                        !globs.covers(path)
+                    } else {
+                        globs.is_excluded(path)
+                    }
                 })
                 .collect()
         } else {

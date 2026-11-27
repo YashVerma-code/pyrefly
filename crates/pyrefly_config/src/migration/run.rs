@@ -25,6 +25,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::base::Preset;
+use crate::config::BaselineMatchingMode;
 use crate::config::ConfigFile;
 use crate::migration::mypy;
 use crate::migration::mypy::ini::parse_mypy_config;
@@ -102,16 +103,16 @@ pub fn find_and_migrate_in_memory(
         return Ok(None);
     };
     if path.file_name() == Some("pyrightconfig.json".as_ref()) {
-        let raw_file = fs_anyhow::read_to_string(&path)
-            .with_context(|| format!("While reading pyright config at {}", path.display()))?;
-        let pyr = PyrightConfig::parse(&raw_file)
-            .with_context(|| format!("While parsing pyright config at {}", path.display()))?;
-        Ok(Some((
-            // unlike with pyproject.toml we have no easy way to tell whether a pyrightconfig.json
-            // is supposed to be for pyright or basedpyright, so we just assume regular pyright
-            pyr.convert(),
-            MigratedFromKind::Pyright(MigratedConfigSource::DedicatedFile),
-        )))
+        let pyr = load_pyright_json(&path, MigrationSource::Auto)?;
+        let basedpyright = pyr.is_basedpyright;
+        let cfg = pyr.convert();
+        let source = MigratedConfigSource::DedicatedFile;
+        let kind = if basedpyright {
+            MigratedFromKind::BasedPyright(source, cfg.root.preset.unwrap_or(Preset::Default))
+        } else {
+            MigratedFromKind::Pyright(source)
+        };
+        Ok(Some((cfg, kind)))
     } else if path.file_name() == Some("mypy.ini".as_ref()) {
         let cfg = parse_mypy_config(&path)?;
         Ok(Some((
@@ -182,7 +183,7 @@ fn find_upward_config(start: &Path, migrate_from: MigrationSource) -> Option<Pat
         MigrationSource::MyPy => {
             vec!["mypy.ini".into(), "pyproject.toml".into()]
         }
-        MigrationSource::Pyright => {
+        MigrationSource::Pyright | MigrationSource::BasedPyright => {
             vec!["pyrightconfig.json".into(), "pyproject.toml".into()]
         }
         MigrationSource::Auto => vec![
@@ -197,9 +198,7 @@ fn find_upward_config(start: &Path, migrate_from: MigrationSource) -> Option<Pat
 
 /// Which type checker config to migrate from.
 ///
-/// When set to a specific source (`MyPy` or `Pyright`), only that source is
-/// tried — there is no fallback. `Auto` (the default) tries mypy first, then
-/// pyright, preserving the historical behavior.
+/// An explicit source disables heuristic detection and fallback to other checkers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum MigrationSource {
     /// Automatically detect: try mypy first, then pyright.
@@ -209,9 +208,12 @@ pub enum MigrationSource {
     /// Migrate only from mypy configuration.
     #[value(name = "mypy")]
     MyPy,
-    /// Migrate only from pyright configuration.
+    /// Migrate only from upstream Pyright configuration.
     #[value(name = "pyright")]
     Pyright,
+    /// Migrate only from BasedPyright configuration.
+    #[value(name = "basedpyright")]
+    BasedPyright,
 }
 
 /// Relative path init writes when the user agrees to create a Pyrefly baseline.
@@ -228,6 +230,28 @@ pub struct MigrationResult {
     /// A basedpyright baseline file exists on disk. The Pyrefly `baseline` key is
     /// not written here; init adds it only after the user agrees.
     pub migrated_baseline: bool,
+}
+
+/// Load the config file shared by Pyright and BasedPyright.
+fn load_pyright_json(path: &Path, source: MigrationSource) -> anyhow::Result<PyrightConfig> {
+    let basedpyright = match source {
+        MigrationSource::Auto => None,
+        MigrationSource::Pyright => Some(false),
+        MigrationSource::BasedPyright => Some(true),
+        MigrationSource::MyPy => {
+            anyhow::bail!("Cannot migrate `{}` as mypy configuration", path.display())
+        }
+    };
+    let raw_file = fs_anyhow::read_to_string(path)
+        .with_context(|| format!("While reading Pyright config at {}", path.display()))?;
+    let mut config = PyrightConfig::parse_json(&raw_file, basedpyright)
+        .with_context(|| format!("While parsing Pyright config at {}", path.display()))?;
+    if source == MigrationSource::Auto && !config.is_basedpyright {
+        config.is_basedpyright = path
+            .parent()
+            .is_some_and(|dir| dir.join(BASEDPYRIGHT_BASELINE_FILE).is_file());
+    }
+    Ok(config)
 }
 
 /// `baselineFile` when set, otherwise basedpyright's default location.
@@ -328,48 +352,37 @@ impl Args {
                 })
                 .map(|config| (config, None))
         };
-        let try_pyright_section = |log: &str| {
-            pyright::parse_pyproject_toml(&raw_file)
-                .inspect(|_| info!("{log}"))
-                .map(|pyr| {
-                    let baseline = Some(pyright_baseline_path(pyr.baseline_file.clone()));
-                    (pyr.convert(), baseline)
-                })
-        };
-        let try_pyright = || {
-            try_pyright_section(&format!(
-                "Migrating [tool.pyright] config from pyproject.toml in `{parent}`"
-            ))
-        };
-        let try_basedpyright = || {
-            try_pyright_section(&format!(
-                "Migrating [tool.basedpyright] config from pyproject.toml in `{parent}`"
-            ))
+        let try_pyright_family = |section| {
+            let pyr = match section {
+                Some(section) => pyright::parse_pyproject_section(&raw_file, section)?,
+                None => pyright::parse_pyproject_toml(&raw_file)?,
+            };
+            let tool = if pyr.is_basedpyright {
+                "basedpyright"
+            } else {
+                "pyright"
+            };
+            info!("Migrating [tool.{tool}] config from pyproject.toml in `{parent}`");
+            let baseline = (pyr.is_basedpyright || migrate_from == MigrationSource::Auto)
+                .then(|| pyright_baseline_path(pyr.baseline_file.clone()));
+            Ok((pyr.convert(), baseline))
         };
 
         match migrate_from {
             MigrationSource::MyPy => try_mypy(),
-            MigrationSource::Pyright => try_pyright(),
-            // Section presence (not parse success) picks the tool, so a
-            // malformed `[tool.mypy]` surfaces its own error instead of
-            // silently falling back to pyright. Kept in sync with
-            // `find_and_migrate_in_memory`.
+            MigrationSource::Pyright => try_pyright_family(Some("pyright")),
+            MigrationSource::BasedPyright => try_pyright_family(Some("basedpyright")),
             MigrationSource::Auto => {
-                let has_mypy = has_toml_section(&raw_file, "tool.mypy");
-                let has_pyright = has_toml_section(&raw_file, "tool.pyright");
-                let has_basedpyright = has_toml_section(&raw_file, "tool.basedpyright");
-                match (has_mypy, has_pyright, has_basedpyright) {
-                    (true, _, _) => try_mypy(),
-                    // A `[tool.pyright]` alongside a `[tool.basedpyright]` is
-                    // rejected by `parse_pyproject_toml`, which `try_pyright`
-                    // calls, so that combination surfaces as an error here too.
-                    (false, true, _) => try_pyright(),
-                    (false, false, true) => try_basedpyright(),
-                    // Neither section is present. Preserve the historical Auto
-                    // behavior of trying mypy then falling back to pyright, so
-                    // the surfaced error matches what `pyrefly init` produced
-                    // before this change.
-                    (false, false, false) => try_mypy().or_else(|_| try_pyright()),
+                // Section presence (not parse success) picks the tool, so a
+                // malformed [tool.mypy] surfaces its own error.
+                if has_toml_section(&raw_file, "tool.mypy") {
+                    try_mypy()
+                } else if has_toml_section(&raw_file, "tool.pyright")
+                    || has_toml_section(&raw_file, "tool.basedpyright")
+                {
+                    try_pyright_family(None)
+                } else {
+                    try_mypy().or_else(|_| try_pyright_family(None))
                 }
             }
         }
@@ -398,23 +411,45 @@ impl Args {
         let original_config_path = if self.original_config_path.is_file() {
             self.original_config_path.clone()
         } else {
-            find_upward_config(&self.original_config_path, self.migrate_from)
-                .ok_or_else(|| anyhow::anyhow!("Failed to find config"))?
+            find_upward_config(&self.original_config_path, self.migrate_from).with_context(
+                || {
+                    format!(
+                        "Could not find a {:?} configuration from `{}`",
+                        self.migrate_from,
+                        self.original_config_path.display()
+                    )
+                },
+            )?
         };
 
         let (config, baseline) = if original_config_path.file_name()
             == Some("pyrightconfig.json".as_ref())
         {
+            let pyr = load_pyright_json(&original_config_path, self.migrate_from)?;
+            let checker = if pyr.is_basedpyright {
+                "BasedPyright"
+            } else {
+                "Pyright"
+            };
             info!(
-                "Migrating pyright config file from: `{}`",
+                "Migrating {checker} config file from: `{}`",
                 original_config_path.display()
             );
-            let raw_file = fs_anyhow::read_to_string(&original_config_path)?;
-            let pyr = PyrightConfig::parse(&raw_file)?;
-            // assume pyrightconfig.json is for pyright, not basedpyright
-            let baseline = Some(pyright_baseline_path(pyr.baseline_file.clone()));
+            let baseline = pyr
+                .is_basedpyright
+                .then(|| pyright_baseline_path(pyr.baseline_file.clone()));
             (pyr.convert(), baseline)
         } else if original_config_path.file_name() == Some("mypy.ini".as_ref()) {
+            if !matches!(
+                self.migrate_from,
+                MigrationSource::Auto | MigrationSource::MyPy
+            ) {
+                anyhow::bail!(
+                    "Cannot migrate `{}` as {:?} configuration",
+                    original_config_path.display(),
+                    self.migrate_from
+                );
+            }
             info!(
                 "Migrating mypy config file from: `{}`",
                 original_config_path.display()
@@ -436,11 +471,15 @@ impl Args {
     }
 
     fn run(&self) -> anyhow::Result<MigrationResult> {
-        let (config, original_config_path, baseline_file) = self.load_config()?;
+        let (mut config, original_config_path, baseline_file) = self.load_config()?;
         let config_dir = original_config_path
             .parent()
             .expect("a config file path has a parent directory");
         let migrated_baseline = found_basedpyright_baseline(config_dir, baseline_file.as_deref());
+        if migrated_baseline {
+            config.baseline_matching_mode = BaselineMatchingMode::ColumnOrdered;
+            config.baseline_auto_update = true;
+        }
 
         let pyrefly_config_path = {
             if original_config_path.ends_with(ConfigFile::PYPROJECT_FILE_NAME) {
@@ -570,6 +609,120 @@ mod tests {
         let output_lines = output.lines().collect::<Vec<_>>();
         assert_eq!(output_lines[0], r#"project-includes = ["src/**/*.py"]"#);
         from_file(&pyrefly_config_path)
+    }
+
+    #[test]
+    fn test_pyright_json_migration_source() -> anyhow::Result<()> {
+        let cases = [
+            (
+                "shared settings",
+                r#"{"reportUnusedCallResult": "warning"}"#,
+                false,
+                None,
+                None,
+            ),
+            (
+                "JSONC comment",
+                "{\n // \"reportAny\": true,\n \"include\": [\"src\"],\n}",
+                false,
+                None,
+                None,
+            ),
+            (
+                "recommended mode",
+                r#"{"typeCheckingMode": "recommended"}"#,
+                false,
+                Some(Preset::All),
+                Some("all"),
+            ),
+            (
+                "all mode",
+                r#"{"typeCheckingMode": "all"}"#,
+                false,
+                Some(Preset::All),
+                Some("all"),
+            ),
+            (
+                "disabled rule",
+                r#"{"reportAny": false}"#,
+                false,
+                Some(Preset::All),
+                Some("all"),
+            ),
+            (
+                "unmapped rule",
+                r#"{"reportIgnoreCommentWithoutRule": "warning"}"#,
+                false,
+                Some(Preset::All),
+                Some("all"),
+            ),
+            (
+                "execution environment rule",
+                r#"{"executionEnvironments": [{"root": "src", "reportExplicitAny": "none"}]}"#,
+                false,
+                Some(Preset::All),
+                Some("all"),
+            ),
+            (
+                "explicit settings",
+                r#"{"reportAny": false, "typeCheckingMode": "off", "pythonPlatform": "Linux"}"#,
+                false,
+                Some(Preset::Off),
+                Some("linux"),
+            ),
+            (
+                "existing baseline",
+                "{}",
+                true,
+                Some(Preset::All),
+                Some("all"),
+            ),
+            (
+                "configured baseline",
+                r#"{"baselineFile": "custom.json"}"#,
+                false,
+                Some(Preset::All),
+                Some("all"),
+            ),
+        ];
+        for (label, source, baseline, preset, platform) in cases {
+            let tmp = tempfile::tempdir()?;
+            fs_anyhow::write(&tmp.path().join("pyrightconfig.json"), source)?;
+            if baseline {
+                write_baseline(tmp.path(), ".basedpyright/baseline.json")?;
+            }
+
+            let (config, kind) =
+                find_and_migrate_in_memory(tmp.path())?.expect("should find pyrightconfig.json");
+            let expected_kind = match preset {
+                Some(preset) => {
+                    MigratedFromKind::BasedPyright(MigratedConfigSource::DedicatedFile, preset)
+                }
+                None => MigratedFromKind::Pyright(MigratedConfigSource::DedicatedFile),
+            };
+            assert_eq!(kind, expected_kind, "{label}");
+            assert_eq!(config.root.preset, preset, "{label}");
+            assert!(!tmp.path().join("pyrefly.toml").exists(), "{label}");
+
+            let result = config_migration(tmp.path(), MigrationSource::Auto, false, false)?;
+            let written = fs_anyhow::read_to_string(&result.config_path)?;
+            let written: toml::Table = toml::from_str(&written)?;
+            assert_eq!(
+                written
+                    .get("preset")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned),
+                preset.map(|p| p.to_string()),
+                "{label}"
+            );
+            assert_eq!(
+                written.get("python-platform").and_then(toml::Value::as_str),
+                platform,
+                "{label}"
+            );
+            assert_eq!(result.migrated_baseline, baseline, "{label}");
+        }
+        Ok(())
     }
 
     #[test]
@@ -770,11 +923,7 @@ files = ["mypy.py"]
     }
 
     #[test]
-    fn test_run_pyproject_both_pyright_sections_rejected() -> anyhow::Result<()> {
-        // Coexisting `[tool.pyright]` and `[tool.basedpyright]` is rejected at
-        // the parse boundary, so an explicit `--migrate-from pyright` is
-        // diagnosed just like `Auto` is, rather than silently migrating the
-        // `[tool.pyright]` variant.
+    fn test_run_pyproject_selects_explicit_pyright_section() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
         let original_config_path = tmp.path().join("pyproject.toml");
         let pyproject = r#"[tool.pyright]
@@ -784,14 +933,61 @@ include = ["pyright.py"]
 include = ["basedpyright.py"]
 "#;
         fs_anyhow::write(&original_config_path, pyproject)?;
-        for source in [MigrationSource::Auto, MigrationSource::Pyright] {
-            let err = Args::load_from_pyproject(&original_config_path, source)
-                .expect_err("coexisting pyright sections should be rejected");
-            assert!(
-                format!("{err:#}").contains("[tool.basedpyright]"),
-                "expected the coexistence error for {source:?}, got: {err:#}"
+        let err = Args::load_from_pyproject(&original_config_path, MigrationSource::Auto)
+            .expect_err("auto should reject coexisting pyright sections");
+        assert!(format!("{err:#}").contains("[tool.basedpyright]"));
+        for (source, include, preset) in [
+            (MigrationSource::Pyright, "pyright.py", None),
+            (
+                MigrationSource::BasedPyright,
+                "basedpyright.py",
+                Some(Preset::All),
+            ),
+        ] {
+            let (config, _) = Args::load_from_pyproject(&original_config_path, source)?;
+            assert_eq!(
+                config.project_includes,
+                Globs::new(vec![include.to_owned()])?
             );
+            assert_eq!(config.root.preset, preset);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_explicit_pyright_overrides_basedpyright_baseline() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let path = tmp.path().join("pyrightconfig.json");
+        fs_anyhow::write(&path, "{}")?;
+        for input in [tmp.path(), &path] {
+            let result = config_migration(input, MigrationSource::BasedPyright, false, false)?;
+            let written = fs_anyhow::read_to_string(&result.config_path)?;
+            assert!(written.contains("preset = \"all\""));
+            assert!(written.contains("python-platform = \"all\""));
+            assert!(!result.migrated_baseline);
+        }
+        write_baseline(tmp.path(), ".basedpyright/baseline.json")?;
+        for input in [tmp.path(), &path] {
+            let result = config_migration(input, MigrationSource::Pyright, false, false)?;
+            let written = fs_anyhow::read_to_string(&result.config_path)?;
+            assert!(!written.contains("preset ="));
+            assert!(!written.contains("python-platform ="));
+            assert!(!result.migrated_baseline);
+            let config: ConfigFile = toml::from_str(&written)?;
+            assert_eq!(config.baseline_matching_mode, BaselineMatchingMode::Column);
+            assert!(!config.baseline_auto_update);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_explicit_mypy_with_pyright_json_path() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let path = tmp.path().join("pyrightconfig.json");
+        fs_anyhow::write(&path, "{}")?;
+        let err = config_migration(&path, MigrationSource::MyPy, true, false)
+            .expect_err("an explicit file cannot override the requested mypy source");
+        assert!(err.to_string().contains("as mypy configuration"));
         Ok(())
     }
 
@@ -855,8 +1051,10 @@ files = ["mypy.py"]
         fs_anyhow::write(&original_config_path, b"[mypy]\nfake_option = True\n")?;
         config_migration(&original_config_path, MigrationSource::Auto, false, false)?;
         let output = fs_anyhow::read_to_string(&pyrefly_config_path)?;
-        // mypy migration uses the `legacy` preset; no redundant explicit settings
-        assert_eq!(output.trim(), "preset = \"legacy\"");
+        assert_eq!(
+            output.trim(),
+            "preset = \"legacy\"\nlegacy-generator-send-type = true"
+        );
         Ok(())
     }
 
@@ -873,7 +1071,7 @@ files = ["mypy.py"]
         let output = fs_anyhow::read_to_string(&pyrefly_config_path)?;
         assert_eq!(
             output.trim(),
-            "preset = \"legacy\"\nreplace-untyped-imports-with-any = [\"!*\"]"
+            "preset = \"legacy\"\nreplace-untyped-imports-with-any = [\"!*\"]\nlegacy-generator-send-type = true"
         );
         Ok(())
     }
@@ -932,7 +1130,10 @@ files = ["mypy.py"]
         fs_anyhow::write(&original_config_path, b"{}")?;
         config_migration(&original_config_path, MigrationSource::Auto, false, false)?;
         let output = fs_anyhow::read_to_string(&pyrefly_config_path)?;
-        assert_eq!(output, "infer-with-first-use = false\n");
+        assert_eq!(
+            output,
+            "legacy-generator-send-type = true\ninfer-with-first-use = false\n"
+        );
         Ok(())
     }
 
@@ -988,6 +1189,13 @@ files = ["mypy.py"]
                 config_name: "pyrightconfig.json",
                 config_body: "{}\n",
                 baseline_on_disk: Some(".basedpyright/baseline.json"),
+                dry_run: false,
+                expect_found: true,
+            },
+            Case {
+                config_name: "pyrightconfig.json",
+                config_body: "{\"baselineFile\": \"custom/baseline.json\"}\n",
+                baseline_on_disk: Some("custom/baseline.json"),
                 dry_run: false,
                 expect_found: true,
             },
@@ -1063,6 +1271,21 @@ files = ["mypy.py"]
                 !written.contains("baseline ="),
                 "migration wrote a baseline key into {written_name}:\n{written}"
             );
+            let parsed: toml::Value = toml::from_str(&written)?;
+            let config: ConfigFile = if written_name == "pyproject.toml" {
+                parsed["tool"]["pyrefly"].clone().try_into()?
+            } else {
+                parsed.try_into()?
+            };
+            assert_eq!(
+                config.baseline_matching_mode,
+                if case.expect_found {
+                    BaselineMatchingMode::ColumnOrdered
+                } else {
+                    BaselineMatchingMode::Column
+                }
+            );
+            assert_eq!(config.baseline_auto_update, case.expect_found);
         }
         Ok(())
     }

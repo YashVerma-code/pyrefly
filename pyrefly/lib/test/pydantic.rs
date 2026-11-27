@@ -10,6 +10,7 @@ mod aliases;
 mod base_settings;
 mod config;
 mod constructor_arguments;
+mod dagster;
 mod dataclasses;
 mod extra;
 mod field;

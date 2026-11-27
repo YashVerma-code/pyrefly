@@ -66,7 +66,7 @@ testcase!(
     r#"
 from typing import Mapping
 
-def fn(obj: U):
+def fn(obj: "U"):
     match obj:
         case {'a': {'b': []}}:
             pass

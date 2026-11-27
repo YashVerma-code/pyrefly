@@ -271,7 +271,7 @@ from typing import Callable
 
 class Node[T]:
     def __init__(self, cb: Callable[[T], None], value: T,
-                 child: Node[int] | Node[str] | None = None) -> None: ...
+                 child: "Node[int]" | "Node[str]" | None = None) -> None: ...
 
 def f(value: int | str) -> None:
     result: Node[int] | Node[str] = Node(lambda arg: None, value, Node(lambda arg: None, value, Node(lambda arg: None, value)))  # E: is not assignable # E: is not assignable # E: is not assignable
@@ -282,7 +282,7 @@ testcase!(
     test_constructor_union_distribution_rejected_nested,
     r#"
 class Node[T]:
-    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+    def __init__(self, value: T, child: "Node[int]" | "Node[str]" | None = None) -> None: ...
 
 def f(value: int | str | bytes) -> None:
     result: Node[int] | Node[str] = Node(value, Node(value, Node(value)))  # E: is not assignable # E: is not assignable # E: is not assignable
@@ -441,7 +441,7 @@ class A[T]:
     def __init__(self, value: T) -> None: ...
 class Node[T]:
     def __init__(self, value: T,
-                 child: Node[int] | Node[str] | None = None) -> None: ...
+                 child: "Node[int]" | "Node[str]" | None = None) -> None: ...
 class Wrap:
     def __init__(self, a: Node[int] | Node[str], b: object) -> None: ...
 def need(x: A[int] | A[str]) -> int: ...
@@ -462,7 +462,7 @@ class A[T]:
     def __init__(self, value: T) -> None: ...
 class Node[T]:
     def __init__(self, value: T,
-                 child: Node[int] | Node[str] | None = None) -> None: ...
+                 child: "Node[int]" | "Node[str]" | None = None) -> None: ...
 class Wrap:
     def __init__(self, a: object, b: object) -> None: ...
 def need(x: A[int] | A[str]) -> int: ...
@@ -538,7 +538,7 @@ testcase!(
     test_constructor_union_distribution_nested,
     r#"
 class Node[T]:
-    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+    def __init__(self, value: T, child: "Node[int]" | "Node[str]" | None = None) -> None: ...
 
 def f(value: int | str) -> None:
     child: Node[int] | Node[str] = Node(value)
@@ -646,7 +646,7 @@ testcase!(
 from typing import assert_type
 
 class Node[T]:
-    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+    def __init__(self, value: T, child: "Node[int] | Node[str] | None" = None) -> None: ...
 
 def f(value: str) -> None:
     root: Node[int] | Node[str] = Node(value, Node(value, Node(value, Node(value, Node(value, Node(value, Node(value, Node(value))))))))
@@ -700,7 +700,7 @@ from typing import assert_type
 class Box[T]:
     def __init__(self, x: T): pass
 
-    def wrap(self) -> Box[Box[T]]:
+    def wrap(self) -> "Box[Box[T]]":
         return Box(self)
 
 def f() -> int:
@@ -761,7 +761,7 @@ from typing import assert_type
 class Box[T]:
     def __init__[S](self, x: S, y: S):
         pass
-    def wrap(self, x: bool) -> Box[Box[T]]:
+    def wrap(self, x: bool) -> "Box[Box[T]]":
         if x:
             return Box(self, self)
         else:
@@ -1283,13 +1283,40 @@ assert_type(x, Any)
     "#,
 );
 
+// https://github.com/pyrefly-org/pyrefly/issues/4889: without first-use inference, an unsolved
+// type variable becomes an implicit `Any`.
+testcase!(
+    bug = "An unsolved type variable in `__new__`'s return is treated as a missing annotation",
+    test_new_returns_unsolved_type_var,
+    TestEnv::new_with_infer_with_first_use(false),
+    r#"
+from typing import assert_type
+class ViaNew:
+    def __new__[T](cls) -> T: ...
+d: int = ViaNew()  # E: `ViaNew` is not assignable to `int`
+assert_type(ViaNew(), ViaNew)
+    "#,
+);
+
+testcase!(
+    bug = "A type variable in `__new__`'s return that is solved to `Any` gives the class",
+    test_new_returns_type_var_solved_to_any,
+    r#"
+from typing import assert_type
+class FromArg:
+    def __new__[T](cls, x: T) -> T: ...
+def f(x):
+    assert_type(FromArg(x), FromArg)
+    "#,
+);
+
 testcase!(
     test_type_self_constructor_ignores_concrete_new_return,
     r#"
 from typing import Self, assert_type
 
 class C:
-    def __new__(cls) -> C:
+    def __new__(cls) -> "C":
         return object.__new__(cls)
 
     @classmethod
@@ -1372,6 +1399,23 @@ assert_type(C(0), C[int])
 assert_type(C[bool](True), C[bool])
 assert_type(C[bool](0), C[bool])  # E: Argument `Literal[0]` is not assignable to parameter `x` with type `bool`
     "#,
+);
+
+testcase!(
+    test_generic_constructor_specialization_identifies_parameter,
+    r#"
+class Holder[T: int]:
+    def __init__(self, value: T, fallback: T) -> None: ...
+
+Holder(1, 2)
+Holder(1, "bad fallback")  # E: While checking parameter `fallback`: `str` is not assignable to upper bound `int` of type variable `T`
+Holder(1, fallback="bad fallback")  # E: While checking parameter `fallback`: `str` is not assignable to upper bound `int` of type variable `T`
+
+class FromNew[T: int]:
+    def __new__(cls, first: T, second: T) -> "FromNew[T]": ...
+
+FromNew(1, "bad second")  # E: While checking parameter `second`: `str` is not assignable to upper bound `int` of type variable `T`
+"#,
 );
 
 testcase!(
@@ -1461,7 +1505,7 @@ from typing import Self
 class A:
     def __new__(cls: type[Self]): ...
 A.__new__(A)  # OK
-A.__new__(int) # E: `int` is not assignable to upper bound `A` of type variable `Self@A`
+A.__new__(int) # E: While checking parameter `cls`: `int` is not assignable to upper bound `A` of type variable `Self@A`
     "#,
 );
 
@@ -1471,7 +1515,7 @@ testcase!(
 class A:
     def __new__(cls): ...
 A.__new__(A)  # OK
-A.__new__(int)  # E: `int` is not assignable to upper bound `A` of type variable `Self@A`
+A.__new__(int)  # E: While checking parameter `cls`: `int` is not assignable to upper bound `A` of type variable `Self@A`
     "#,
 );
 
@@ -1520,7 +1564,7 @@ testcase!(
     r#"
 from typing import assert_type
 class C[T]:
-    def __new__[T2](cls, x: T2) -> C[T2]: ...
+    def __new__[T2](cls, x: T2) -> "C[T2]": ...
 assert_type(C(0), C[int])
     "#,
 );
@@ -1607,7 +1651,7 @@ testcase!(
     r#"
 from typing import assert_type
 class A[T]:
-    def __init__(self: A[str]): pass
+    def __init__(self: "A[str]"): pass
 assert_type(A(), A[str])
     "#,
 );
@@ -1633,9 +1677,9 @@ class B: ...
 
 class C[T]:
     @overload
-    def __init__(self: C[A], x: Literal[True]) -> None: ...
+    def __init__(self: "C[A]", x: Literal[True]) -> None: ...
     @overload
-    def __init__(self: C[B], x: Literal[False]) -> None: ...
+    def __init__(self: "C[B]", x: Literal[False]) -> None: ...
     def __init__(self, x):
         pass
 
@@ -1752,12 +1796,12 @@ from typing import assert_type, overload
 
 class Path:
     @overload
-    def __new__(cls: type[AbsPath], path: str) -> AbsPath: ...
+    def __new__(cls: "type[AbsPath]", path: str) -> "AbsPath": ...
     @overload
-    def __new__(cls: type[RelPath], path: str) -> RelPath: ...
+    def __new__(cls: "type[RelPath]", path: str) -> "RelPath": ...
     @overload
-    def __new__(cls: type[Path], path: str) -> AbsPath | RelPath: ...
-    def __new__(cls: type[Path], path: str) -> Path:
+    def __new__(cls: "type[Path]", path: str) -> "AbsPath | RelPath": ...
+    def __new__(cls: "type[Path]", path: str) -> "Path":
         raise NotImplementedError
 
 class AbsPath(Path): ...
@@ -1776,9 +1820,9 @@ from typing import overload
 
 class Base:
     @overload
-    def __init__(self: Sub, value: int) -> None: ...
+    def __init__(self: "Sub", value: int) -> None: ...
     @overload
-    def __init__(self: Base, value: str) -> None: ...
+    def __init__(self: "Base", value: str) -> None: ...
     def __init__(self, value: int | str):
         pass
 
@@ -1793,8 +1837,8 @@ testcase!(
     test_constructor_subclass_receiver_requires_overload,
     r#"
 class Base:
-    def __new__(cls: type[Sub]) -> Sub: ...  # E: `__new__` method cls type `type[Sub]` refers to class `Sub`, which is not a superclass of class `Base`
-    def __init__(self: Sub) -> None: ...  # E: `__init__` method self type `Sub` is not a superclass of class `Base`
+    def __new__(cls: "type[Sub]") -> "Sub": ...  # E: `__new__` method cls type `type[Sub]` refers to class `Sub`, which is not a superclass of class `Base`
+    def __init__(self: "Sub") -> None: ...  # E: `__init__` method self type `Sub` is not a superclass of class `Base`
 
 class Sub(Base): ...
     "#,
@@ -1812,9 +1856,9 @@ class TypeEngine[T]: ...
 
 class UUID[T: (A, B)](TypeEngine[T]):
     @overload
-    def __init__(self: UUID[A], as_uuid: Literal[True]) -> None: ...
+    def __init__(self: "UUID[A]", as_uuid: Literal[True]) -> None: ...
     @overload
-    def __init__(self: UUID[B], as_uuid: Literal[False]) -> None: ...
+    def __init__(self: "UUID[B]", as_uuid: Literal[False]) -> None: ...
     def __init__(self, as_uuid): ...
 
 class Column[T]:
@@ -1832,10 +1876,10 @@ from typing import Any, Generic, TypeVar, assert_type
 T = TypeVar("T", bound=int, default=Any)
 
 class A(Generic[T]):
-    def __new__(cls, x: T) -> A[T]: ...
+    def __new__(cls, x: T) -> "A[T]": ...
 
 assert_type(A(0), A[int])
-A("oops")  # E: `str` is not assignable to upper bound `int` of type variable `T`
+A("oops")  # E: While checking parameter `x`: `str` is not assignable to upper bound `int` of type variable `T`
     "#,
 );
 
@@ -1845,10 +1889,10 @@ testcase!(
 from typing import Any, assert_type
 
 class A[T = Any]:
-    def __new__(cls, x: T) -> A[T]: ...
+    def __new__(cls, x: T) -> "A[T]": ...
 
 class B[T: int | A[Any] = Any]:
-    def __new__(cls, x: list[A[T]]) -> B[A[T]]: ...
+    def __new__(cls, x: list[A[T]]) -> "B[A[T]]": ...
 
 assert_type(B([A(0)]), B[A[int]])
 B([A("oops")])  # E: `str` is not assignable to upper bound `A | int` of type variable `T`
@@ -2410,10 +2454,10 @@ from typing import Any, assert_type, overload
 
 class C[T]:
     @overload
-    def __new__(cls: type[C[int]], x: object) -> C[int]: ...
+    def __new__(cls: "type[C[int]]", x: object) -> "C[int]": ...
     @overload
-    def __new__(cls: type[C[str]], x: str) -> C[str]: ...
-    def __new__(cls: type[Any], x: object) -> C[int] | C[str]:
+    def __new__(cls: "type[C[str]]", x: str) -> "C[str]": ...
+    def __new__(cls: type[Any], x: object) -> "C[int] | C[str]":
         raise NotImplementedError
 
 ok: Callable[[str], C[str]] = C[str]
@@ -2442,10 +2486,10 @@ b: Callable[[str], NoAnnotation[str]] = NoAnnotation
 # A bare generic class keeps every overload, since its type parameter is not yet solved.
 class C[T]:
     @overload
-    def __new__(cls: type[C[int]], x: object) -> C[int]: ...
+    def __new__(cls: "type[C[int]]", x: object) -> "C[int]": ...
     @overload
-    def __new__(cls: type[C[str]], x: str) -> C[str]: ...
-    def __new__(cls: type[Any], x: object) -> C[int] | C[str]: ...
+    def __new__(cls: "type[C[str]]", x: str) -> "C[str]": ...
+    def __new__(cls: type[Any], x: object) -> "C[int] | C[str]": ...
 
 bare: Callable[[str], C[str]] = C
 
@@ -2485,9 +2529,9 @@ from typing import Any, assert_type, overload
 
 class I[T]:
     @overload
-    def __init__(self: I[int], x: object) -> None: ...
+    def __init__(self: "I[int]", x: object) -> None: ...
     @overload
-    def __init__(self: I[str], x: str) -> None: ...
+    def __init__(self: "I[str]", x: str) -> None: ...
     def __init__(self, x: Any) -> None: ...
 
 ok: Callable[[str], I[str]] = I[str]

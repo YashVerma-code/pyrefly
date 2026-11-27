@@ -53,6 +53,8 @@ pub enum QuantifiedOrigin {
         /// Is this a Self quantified synthesized for `__new__` on a class?
         is_self: bool,
     },
+    /// Self in an unbound instance method, whose nominal bound supplies an inference fallback.
+    UnboundMethodSelf,
     /// An inferred receiver shared by an instance method and a classmethod wrapper.
     MethodReceiver,
     /// A dimension or variadic shape declared by a shape declaration on a class or function.

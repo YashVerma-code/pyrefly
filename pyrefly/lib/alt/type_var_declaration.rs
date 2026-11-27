@@ -142,6 +142,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             restriction = Some(Restriction::Bound(bound));
                         }
                     }
+                    // Python 3.15 adds `bound` to `TypeVarTuple`. The typing spec does not define
+                    // what a `TypeVarTuple` bound means, so pyrefly checks that it is a type and
+                    // otherwise ignores it.
+                    "bound"
+                        if matches!(kind, QuantifiedKind::TypeVarTuple)
+                            && self.bindings().sys_info().version().at_least(3, 15) =>
+                    {
+                        self.expr_untype(&kw.value, TypeFormContext::TypeVarConstraint, errors);
+                    }
                     "default" => {
                         default = Some(&kw.value);
                     }

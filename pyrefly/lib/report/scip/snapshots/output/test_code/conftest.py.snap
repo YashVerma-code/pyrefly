@@ -1,0 +1,20 @@
+# < definition test scip-python python snapshot-util 0.1 conftest/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# pytest loads fixtures from this module, so all of it is test code.
+import pytest
+#      ^^^^^^ reference test  pytest . pytest/__init__:
+
+
+@pytest.fixture
+#^^^^^^ reference test  pytest . pytest/__init__:
+#       ^^^^^^^ reference test  pytest . pytest/fixture().
+def side() -> int:
+#   ^^^^ definition test  snapshot-util 0.1 conftest/side().
+#             ^^^ reference test  python-stdlib 3.13 builtins/int#
+    return 3
+

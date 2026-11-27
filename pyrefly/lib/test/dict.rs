@@ -129,8 +129,8 @@ def key(data: dict[KI, S1]) -> dict[KI, S1]: ...
 def value(data: dict[str, KI]) -> KI: ...
 def key_in_union(data: dict[str, list[int]] | dict[KI, int]) -> KI: ...
 
-key({"a": 1})  # E: `str` is not assignable to upper bound `int` of type variable `KI`
-value({"a": "b"})  # E: `str` is not assignable to upper bound `int` of type variable `KI`
+key({"a": 1})  # E: While checking parameter `data`: `str` is not assignable to upper bound `int` of type variable `KI`
+value({"a": "b"})  # E: While checking parameter `data`: `str` is not assignable to upper bound `int` of type variable `KI`
 key_in_union({"a": 1})  # E: `Literal[1]` is not assignable to dict value type `list[int]`
     "#,
 );
@@ -322,7 +322,7 @@ d = {"x": 0}
 assert_type(f(d), TD)  # E: assert_type(dict[str, int], TD)
 
 # This `f` call incorrectly fails, and the returned type is wrong.
-assert_type(f({"x": 0}), TD)  # E: `dict[str, int]` is not assignable to upper bound `TD`  # E: assert_type(dict[str, int], TD)
+assert_type(f({"x": 0}), TD)  # E: While checking parameter `x`: `dict[str, int]` is not assignable to upper bound `TD` of type variable `T`  # E: assert_type(dict[str, int], TD)
     "#,
 );
 
@@ -392,6 +392,17 @@ assert_type(frozendict({"x": 1}), frozendict[str, int])
 assert_type(frozendict([("x", 1)]), frozendict[str, int])
 assert_type(frozendict(x=1), frozendict[str, int])
 assert_type(frozendict({"x": 1}, y=2), frozendict[str, int])
+"#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/5289
+testcase!(
+    bug = "`frozendict` should be covariant in its value type",
+    test_frozendict_value_covariant,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+fd: frozendict[str, int] = frozendict(a=1)
+fd2: frozendict[str, int | None] = fd  # E: `frozendict[str, int]` is not assignable to `frozendict[str, int | None]`
 "#,
 );
 

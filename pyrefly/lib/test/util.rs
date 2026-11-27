@@ -276,10 +276,13 @@ pub struct TestEnv {
     implicit_abstract_class_error: bool,
     open_unpacking_error: bool,
     method_assign_error: bool,
+    bad_descriptor_inheritance_error: bool,
+    bad_override_descriptor_error: bool,
     missing_override_decorator_error: bool,
     missing_super_call_error: bool,
     missing_source_error: bool,
     unsafe_multiple_inheritance_error: bool,
+    import_cycle_error: bool,
     unused_ignore_errors: bool,
     pyre_ignores: bool,
     not_required_key_access_error: bool,
@@ -300,6 +303,7 @@ pub struct TestEnv {
     strict_partial_subtyping: bool,
     spec_compliant_overloads: bool,
     legacy_overload_expansion: bool,
+    legacy_generator_send_type: bool,
     treat_all_caps_as_final: bool,
     infer_param_types_from_docstring: bool,
     use_shape_comments_and_stubs: bool,
@@ -367,10 +371,13 @@ impl TestEnv {
             implicit_abstract_class_error: false,
             open_unpacking_error: false,
             method_assign_error: false,
+            bad_descriptor_inheritance_error: false,
+            bad_override_descriptor_error: false,
             missing_override_decorator_error: false,
             missing_super_call_error: false,
             missing_source_error: false,
             unsafe_multiple_inheritance_error: false,
+            import_cycle_error: false,
             unused_ignore_errors: false,
             pyre_ignores: false,
             not_required_key_access_error: false,
@@ -391,6 +398,7 @@ impl TestEnv {
             strict_partial_subtyping: false,
             spec_compliant_overloads: false,
             legacy_overload_expansion: false,
+            legacy_generator_send_type: false,
             treat_all_caps_as_final: false,
             infer_param_types_from_docstring: false,
             use_shape_comments_and_stubs: true,
@@ -524,6 +532,16 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_bad_descriptor_inheritance_error(mut self) -> Self {
+        self.bad_descriptor_inheritance_error = true;
+        self
+    }
+
+    pub fn enable_bad_override_descriptor_error(mut self) -> Self {
+        self.bad_override_descriptor_error = true;
+        self
+    }
+
     pub fn enable_inactive_code_error(mut self) -> Self {
         self.inactive_code_error = true;
         self
@@ -629,6 +647,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_import_cycle_error(mut self) -> Self {
+        self.import_cycle_error = true;
+        self
+    }
+
     pub fn enable_unused_ignore_errors(mut self) -> Self {
         self.unused_ignore_errors = true;
         self
@@ -726,6 +749,11 @@ impl TestEnv {
 
     pub fn enable_spec_compliant_overloads(mut self) -> Self {
         self.spec_compliant_overloads = true;
+        self
+    }
+
+    pub fn enable_legacy_generator_send_type(mut self) -> Self {
+        self.legacy_generator_send_type = true;
         self
     }
 
@@ -963,6 +991,7 @@ impl TestEnv {
         config.root.strict_partial_subtyping = Some(self.strict_partial_subtyping);
         config.root.spec_compliant_overloads = Some(self.spec_compliant_overloads);
         config.root.legacy_overload_expansion = Some(self.legacy_overload_expansion);
+        config.root.legacy_generator_send_type = Some(self.legacy_generator_send_type);
         config.root.treat_all_caps_as_final = Some(self.treat_all_caps_as_final);
         config.root.infer_param_types_from_docstring = Some(self.infer_param_types_from_docstring);
         config.use_shape_comments_and_stubs = Some(self.use_shape_comments_and_stubs);
@@ -1049,6 +1078,12 @@ impl TestEnv {
         if self.method_assign_error {
             errors.set_error_severity(ErrorKind::MethodAssign, Severity::Error);
         }
+        if self.bad_descriptor_inheritance_error {
+            errors.set_error_severity(ErrorKind::BadDescriptorInheritance, Severity::Error);
+        }
+        if self.bad_override_descriptor_error {
+            errors.set_error_severity(ErrorKind::BadOverrideDescriptor, Severity::Error);
+        }
         if self.missing_override_decorator_error {
             errors.set_error_severity(ErrorKind::MissingOverrideDecorator, Severity::Error);
         }
@@ -1060,6 +1095,9 @@ impl TestEnv {
         }
         if self.unsafe_multiple_inheritance_error {
             errors.set_error_severity(ErrorKind::UnsafeMultipleInheritance, Severity::Error);
+        }
+        if self.import_cycle_error {
+            errors.set_error_severity(ErrorKind::ImportCycle, Severity::Error);
         }
         if self.unused_ignore_errors {
             errors.set_error_severity(ErrorKind::UnusedIgnore, Severity::Error);

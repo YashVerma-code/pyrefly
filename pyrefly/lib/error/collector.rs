@@ -5,12 +5,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::mem;
 use std::sync::Arc;
 
 use dupe::Dupe;
 use pyrefly_config::error_kind::ErrorKind;
+use pyrefly_python::ignore::MalformedReason;
 use pyrefly_python::ignore::Suppression;
 use pyrefly_python::ignore::SuppressionEffect;
 use pyrefly_python::ignore::Tool;
@@ -173,28 +175,42 @@ impl ModuleErrors {
     }
 }
 
-/// For each error, whether it is an `unknown-from-error` error that a counted error within its
-/// range explains. Such an error reports a value whose type comes from another error, and an
-/// error within its range is the cause or a more precise report of the same unknown value. At an
-/// equal range, only an error of another kind counts. `items` must be sorted by range.
+/// For each error, whether an `unknown-from-error` diagnostic is explained by a counted
+/// error within its causal span. At an equal span, only an error of another kind counts.
+/// `items` must be sorted by primary range.
 fn unknown_from_error_explained(items: &[&Error], counts: impl Fn(ErrorKind) -> bool) -> Vec<bool> {
-    // The candidates for each error start at the first item that does not start before it.
+    // Primary highlights and causal spans can be ordered differently. Keep the existing
+    // sorted slice when they coincide, without allocating another index.
+    let mut candidates = Cow::Borrowed(items);
+    if items
+        .iter()
+        .any(|error| error.explanation_range() != error.range())
+    {
+        candidates.to_mut().sort_by_key(|error| {
+            (
+                error.explanation_range().start(),
+                error.explanation_range().end(),
+            )
+        });
+    }
     items
         .iter()
         .map(|x| {
             if x.error_kind() != ErrorKind::UnknownFromError {
                 return false;
             }
-            let range = x.range();
-            let first = items.partition_point(|y| y.range().start() < range.start());
-            // `x` itself has an equal range and the same kind, so the last condition skips it.
-            items[first..]
+            let range = x.explanation_range();
+            let first =
+                candidates.partition_point(|y| y.explanation_range().start() < range.start());
+            // `x` itself has an equal span and the same kind, so the last condition skips it.
+            candidates[first..]
                 .iter()
-                .take_while(|y| y.range().start() <= range.end())
+                .take_while(|y| y.explanation_range().start() <= range.end())
                 .any(|y| {
                     counts(y.error_kind())
-                        && range.contains_range(y.range())
-                        && (y.range() != range || y.error_kind() != ErrorKind::UnknownFromError)
+                        && range.contains_range(y.explanation_range())
+                        && (y.explanation_range() != range
+                            || y.error_kind() != ErrorKind::UnknownFromError)
                 })
         })
         .collect()
@@ -451,6 +467,7 @@ impl ErrorCollector {
             collector: self,
             active: self.is_active(),
             range,
+            explanation_range: range,
             kind,
             header,
             details: Vec::new(),
@@ -508,6 +525,48 @@ impl ErrorCollector {
                 MISPLACED_IGNORE_MESSAGE.to_owned(),
             )
             .emit();
+        }
+    }
+
+    /// Record syntax diagnostics independently of the current enabled tools.
+    pub(crate) fn add_invalid_ignores(&self) {
+        for malformed in self.module_info.ignore().malformed() {
+            let tool = malformed.tool();
+            let msg = match malformed.reason() {
+                MalformedReason::UnknownDirective => match tool {
+                    Tool::Pyre => "Invalid ignore comment; did you mean `# pyre-ignore`, `# pyre-fixme`, or `# pyre: ignore`?".to_owned(),
+                    Tool::Mypy => "Invalid ignore comment; did you mean `# mypy: ignore-errors`?".to_owned(),
+                    _ => format!("Invalid ignore comment; did you mean `# {tool}: ignore` or `# {tool}: ignore[code]`?"),
+                },
+                MalformedReason::UnterminatedBracket => format!("Unterminated `[` in `# {tool}: ignore[...]` error-code list"),
+                MalformedReason::EmptyBracket => format!("Empty error-code list in `# {tool}: ignore[]`"),
+            };
+            self.error_builder(malformed.range(), ErrorKind::InvalidIgnoreComment, msg)
+                .emit();
+        }
+    }
+
+    /// Record diagnostics for `# pyrefly: ignore` comments that omit an error code.
+    pub(crate) fn add_ignore_without_code(&self) {
+        for (_, suppressions) in self.module_info.ignore().iter() {
+            for supp in suppressions {
+                if supp.tool() == Tool::Pyrefly && supp.error_codes().is_empty() {
+                    let line_start = self
+                        .module_info
+                        .lined_buffer()
+                        .line_start(supp.comment_line());
+                    let range = TextRange::new(
+                        line_start + TextSize::new(supp.comment_offset() as u32),
+                        line_start + TextSize::new(supp.comment_end_offset() as u32),
+                    );
+                    self.error_builder(
+                        range,
+                        ErrorKind::IgnoreWithoutCode,
+                        "`# pyrefly: ignore` has no error code; specify the code(s) being suppressed, e.g. `# pyrefly: ignore[bad-return]`".to_owned(),
+                    )
+                    .emit();
+                }
+            }
         }
     }
 
@@ -680,9 +739,28 @@ impl ErrorCollector {
                 }
                 continue;
             }
-            // A `misplaced-ignore` error is about a suppression comment, so the fix is to
-            // move or remove the comment rather than to suppress the error.
-            let effect = if error.error_kind() == ErrorKind::MisplacedIgnore {
+            if error.error_kind() == ErrorKind::InvalidIgnoreComment {
+                let malformed = module_info.ignore().malformed();
+                let index = malformed.binary_search_by_key(&(error.range().start(), error.range().end()), |comment| (comment.range().start(), comment.range().end()))
+                    .expect("invalid-ignore-comment diagnostics originate from parsed malformed comments");
+                if !error_config
+                    .enabled_ignores
+                    .contains(&malformed[index].tool())
+                {
+                    continue;
+                }
+            }
+            if error.error_kind() == ErrorKind::IgnoreWithoutCode
+                && !error_config.enabled_ignores.contains(&Tool::Pyrefly)
+            {
+                continue;
+            }
+            // Disabled diagnostics do not use suppressions. Ignore-comment diagnostics
+            // bypass whole-file, per-line and multi-line string suppression together.
+            let effect = if severity == Severity::Ignore
+                || error.error_kind().is_unsuppressable()
+                || error.error_kind() == ErrorKind::MisplacedIgnore
+            {
                 SuppressionEffect::None
             } else {
                 Self::suppression_effect(error, fstring_ranges, ignore_all, error_config)
@@ -725,6 +803,7 @@ pub struct ErrorBuilder<'a> {
     collector: &'a ErrorCollector,
     active: bool,
     range: TextRange,
+    explanation_range: TextRange,
     kind: ErrorKind,
     header: String,
     details: Vec<String>,
@@ -742,6 +821,12 @@ struct RenderedErrorContext {
 }
 
 impl ErrorBuilder<'_> {
+    /// Search this span for a root error or a more precise `unknown-from-error` report.
+    pub(crate) fn with_explanation_range(mut self, range: TextRange) -> Self {
+        self.explanation_range = range;
+        self
+    }
+
     /// Append a detail line (shown indented below the header).
     pub fn with_detail(mut self, msg: String) -> Self {
         if self.active {
@@ -874,7 +959,8 @@ impl ErrorBuilder<'_> {
             header,
             details,
             kind,
-        );
+        )
+        .with_explanation_range(self.explanation_range);
         for (range, label) in annotations {
             err = err.with_annotation(range, label);
         }
@@ -910,6 +996,57 @@ mod tests {
 
     fn add(errors: &ErrorCollector, range: TextRange, kind: ErrorKind, msg: String) {
         errors.error_builder(range, kind, msg).emit();
+    }
+
+    #[test]
+    fn test_unknown_from_error_explanation_order() {
+        let module = ModuleInfo::new(
+            ModuleName::from_str("main"),
+            ModulePath::filesystem(PathBuf::from("main.py")),
+            Arc::new(" ".repeat(40)),
+        );
+        let range = |start, end| TextRange::new(TextSize::new(start), TextSize::new(end));
+        let mut errors = [
+            (
+                range(0, 1),
+                range(30, 40),
+                ErrorKind::UnknownFromError,
+                "first unknown",
+            ),
+            (
+                range(10, 11),
+                range(10, 11),
+                ErrorKind::UnknownName,
+                "first cause",
+            ),
+            (
+                range(20, 21),
+                range(5, 15),
+                ErrorKind::UnknownFromError,
+                "second unknown",
+            ),
+            (
+                range(32, 35),
+                range(32, 35),
+                ErrorKind::MissingAttribute,
+                "second cause",
+            ),
+        ]
+        .map(|(range, explanation_range, kind, message)| {
+            Error::new(module.dupe(), range, message.to_owned(), Vec::new(), kind)
+                .with_explanation_range(explanation_range)
+        });
+        errors.sort_by_key(|error| (error.range().start(), error.range().end()));
+        let errors = errors.iter().collect::<Vec<_>>();
+        let explained = unknown_from_error_explained(&errors, |_| true);
+        assert_eq!(
+            errors
+                .iter()
+                .zip(explained)
+                .filter_map(|(error, explained)| (!explained).then_some(error.msg_header()))
+                .collect::<Vec<_>>(),
+            ["first cause", "second cause"],
+        );
     }
 
     #[test]

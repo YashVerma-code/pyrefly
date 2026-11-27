@@ -18,6 +18,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_types::callable::Param;
 use pyrefly_types::class::Class;
+use pyrefly_types::class::ClassType;
 use pyrefly_types::function::Deprecation;
 use pyrefly_types::function::FuncDefIndex;
 use pyrefly_types::keywords::TypeMap;
@@ -69,7 +70,7 @@ pub enum SpecialDecorator<'a> {
     Overload,
     StaticMethod(Name),
     ClassMethod(Name),
-    Property(Name),
+    Property(Name, Option<ClassType>),
     CachedProperty(Name),
     EnumMember,
     Override,

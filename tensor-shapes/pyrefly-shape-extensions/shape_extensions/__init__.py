@@ -17,6 +17,7 @@ import sys
 import typing
 import warnings
 from dataclasses import dataclass
+from importlib import _bootstrap
 
 # A shape annotation carrying its shape as string metadata. To Pyrefly, the
 # string supplies type arguments to a generic class, after any explicit ones:
@@ -187,63 +188,54 @@ def _patch_torch() -> None:
             cls.__class_getitem__ = classmethod(_return_class)
 
 
-def _patch_torch_safely() -> None:
-    """Report incompatible Torch classes without breaking the Torch import."""
-
-    try:
-        _patch_torch()
-    except (AttributeError, TypeError) as error:
-        warnings.warn(
-            f"Could not patch torch for shape annotations: {error}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-
 def _is_initializing(module) -> bool:
     """Whether the import system is still executing `module`'s body."""
 
     return getattr(getattr(module, "__spec__", None), "_initializing", False)
 
 
-def _patch_torch_when_imported() -> None:
-    """Patch Torch now if it has been imported, and otherwise once it is.
+# Every framework integration must use this lazy registration path.
+# Importing annotation markers must never load a framework just to patch it.
+def _patch_when_imported(name: str, callback: typing.Callable[[], None]) -> None:
+    """Patch an imported framework, or defer patching until its first import."""
 
-    Importing `shape_extensions` alone never imports Torch.
-    """
+    def patch() -> None:
+        try:
+            callback()
+        except (AttributeError, TypeError) as error:
+            warnings.warn(
+                f"Could not patch {name} for shape annotations: {error}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
-    torch = sys.modules.get("torch")
-    if _is_initializing(torch):
-        # Another thread may be importing Torch, in which case `import torch`
-        # waits for that import to finish. If Torch's own initialization
-        # imported this module, it instead returns the same partially
-        # initialized module, which cannot be patched yet. A failed import
-        # leaves `sys.modules`, so the hook below patches a retried import.
-        with contextlib.suppress(ImportError):
-            import torch  # @manual
-        torch = sys.modules.get("torch")
-        if _is_initializing(torch):
+    module = sys.modules.get(name)
+    if _is_initializing(module):
+        # Wait without importing: the other thread may fail and remove its
+        # sys.modules entry before we get here. An import would then restart
+        # the framework. The import system's lock-only wait also tolerates
+        # circular imports, which can still leave the module initializing.
+        _bootstrap._lock_unlock_module(name)
+        module = sys.modules.get(name)
+        if _is_initializing(module):
             return
-    if torch is None:
-        sys.meta_path.insert(0, _PostImportHook("torch", _patch_torch_safely))
+    if module is None:
+        sys.meta_path.insert(0, _PostImportHook(name, patch))
         return
-    _patch_torch_safely()
+    patch()
 
 
-_patch_torch_when_imported()
+def _patch_jax() -> None:
+    """Make JAX arrays subscriptable at runtime. Calling it again is a no-op."""
 
-
-def _patch_jax_if_available() -> None:
-    try:
-        import jax  # @manual
-    except ImportError:
-        return
+    import jax  # @manual
 
     if hasattr(jax, "Array") and not hasattr(jax.Array, "__class_getitem__"):
         jax.Array.__class_getitem__ = classmethod(_return_class)
 
 
-_patch_jax_if_available()
+_patch_when_imported("torch", _patch_torch)
+_patch_when_imported("jax", _patch_jax)
 
 
 class IntTuple:

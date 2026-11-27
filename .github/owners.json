@@ -1,12 +1,12 @@
-[
-  "grievejia",
-  "stroxler",
-  "kinto0",
-  "samwgoldman",
-  "rchen152",
-  "lolpack",
-  "connernilsen",
-  "maggiemoss",
-  "javabster",
-  "ndmitchell"
-]
+{
+  "grievejia": {},
+  "stroxler": { "reviews": true },
+  "kinto0": { "reviews": true },
+  "samwgoldman": {},
+  "rchen152": { "reviews": true },
+  "lolpack": {},
+  "connernilsen": { "reviews": true },
+  "maggiemoss": {},
+  "javabster": {},
+  "ndmitchell": {}
+}

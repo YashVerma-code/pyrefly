@@ -11,6 +11,43 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_dataclass_defaults_do_not_make_constructor_partially_unknown,
+    TestEnv::new().enable_partially_unknown_type_error(),
+    r#"
+from dataclasses import dataclass, field
+from typing import Callable
+
+@dataclass
+class C:
+    value: int = 0
+
+@dataclass
+class D:
+    value: int = field(default=0)
+    values: list[int] = field(default_factory=list)
+
+init: Callable[[C, int], None] = C.__init__
+field_init: Callable[[D, int, list[int]], None] = D.__init__
+C()
+D()
+"#,
+);
+
+testcase!(
+    test_dataclass_default_display_does_not_check_unprovided_argument,
+    r#"
+from dataclasses import dataclass, field
+from typing import Literal, Sequence
+
+@dataclass
+class C:
+    values: Sequence[Literal["enabled"]] = field(default=("enabled",))
+
+C()
+"#,
+);
+
+testcase!(
     test_def,
     r#"
 from typing import assert_type
@@ -20,6 +57,82 @@ class Data:
     x: int
     y: str
 assert_type(Data, type[Data])
+    "#,
+);
+
+testcase!(
+    test_dataclass_default_solves_type_var,
+    r#"
+from dataclasses import dataclass, field
+from typing import assert_type
+
+class Explicit[T]:
+    def __init__(self, x: T = 5) -> None:
+        self.x = x
+
+@dataclass
+class Generated[T]:
+    x: T = 5  # E: `Literal[5]` is not assignable to `T`
+
+@dataclass
+class FromField[T]:
+    x: T = field(default=5)  # E: `int` is not assignable to `T`
+
+assert_type(Explicit(), Explicit[int])
+assert_type(Generated(), Generated[int])
+assert_type(Generated(5), Generated[int])
+assert_type(Generated("a"), Generated[str])
+assert_type(FromField(), FromField[int])
+    "#,
+);
+
+testcase!(
+    test_dataclass_inherited_default_type_var,
+    r#"
+from dataclasses import dataclass
+from typing import assert_type
+
+@dataclass
+class Base[T]:
+    x: T
+    y: frozenset[T] = frozenset()
+
+@dataclass
+class Child[S](Base[S]):
+    pass
+
+assert_type(Child(1), Child[int])
+    "#,
+);
+
+testcase!(
+    test_dataclass_default_factory_type_var,
+    r#"
+from dataclasses import dataclass, field
+from typing import assert_type
+
+@dataclass
+class A[T]:
+    x: T
+    y: list[T] = field(default_factory=lambda: [])
+
+assert_type(A(1), A[int])
+    "#,
+);
+
+testcase!(
+    test_dataclass_generic_descriptor_default,
+    r#"
+from dataclasses import dataclass
+from typing import Any
+
+class BadDesc[T]:
+    def __get__(self, obj: Any, owner: Any) -> int: ...
+    def __set__(self, obj: Any, value: str) -> None: ...
+
+@dataclass
+class A[T]:
+    x: BadDesc[T] = BadDesc()  # E: Cannot set field `x` to data descriptor `BadDesc` with inconsistent types
     "#,
 );
 
@@ -256,8 +369,8 @@ class Bar:
     x: int
 
 def f(obj: Union[Foo, Bar]):
-    replace(obj, x=0)  # E: `Bar` is not assignable to upper bound `DataclassInstance`
-    replace(obj, x="oops")  # E: `Bar` is not assignable to upper bound `DataclassInstance`  # E: Argument `Literal['oops']` is not assignable to parameter `x` with type `int`
+    replace(obj, x=0)  # E: While checking parameter `obj`: `Bar` is not assignable to upper bound `DataclassInstance` of type variable `_DataclassT`
+    replace(obj, x="oops")  # E: While checking parameter `obj`: `Bar` is not assignable to upper bound `DataclassInstance` of type variable `_DataclassT`  # E: Argument `Literal['oops']` is not assignable to parameter `x` with type `int`
     "#,
 );
 

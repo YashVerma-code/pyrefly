@@ -57,24 +57,34 @@ $ $JQ '.errors | length' $TMPDIR/baseline_narrowed/baseline.json
 [0]
 ```
 
-## `--prune-baseline` drops stale entries without recording new errors
+## `--prune-baseline` leaves the baseline unchanged while new errors remain
 
 ```scrut {output_stream: stderr}
 $ mkdir -p $TMPDIR/baseline_prune && \
 > printf 'x: str = 1\nyyyy: int = ""\n' > $TMPDIR/baseline_prune/bad.py && \
 > echo '{"errors": [{"line": 1, "column": 10, "stop_line": 1, "stop_column": 11, "path": "bad.py", "code": -2, "name": "bad-assignment", "description": "test", "concise_description": "test"}, {"line": 1, "column": 1, "stop_line": 1, "stop_column": 2, "path": "gone.py", "code": -2, "name": "bad-return", "description": "test", "concise_description": "test"}]}' > $TMPDIR/baseline_prune/baseline.json && \
+> cp $TMPDIR/baseline_prune/baseline.json $TMPDIR/baseline_prune/original.json && \
 > touch $TMPDIR/baseline_prune/pyrefly.toml && \
 > cd $TMPDIR/baseline_prune && \
 > $PYREFLY check bad.py --baseline=baseline.json --prune-baseline --summary=none --output-format=omit-errors
- INFO Removed 1 unused suppression from the baseline file
+ INFO Skipped baseline pruning because new errors remain
 [1]
 ```
 
-The still-matching entry is kept, and the new error on line 2 is not added.
+Neither the matching nor the stale entry is changed, and the new error is not added.
 
 ```scrut {output_stream: stdout}
-$ grep -c '"name":' $TMPDIR/baseline_prune/baseline.json
-1
+$ cd $TMPDIR/baseline_prune && cmp -s original.json baseline.json
+[0]
+```
+
+After fixing the new error, pruning drops only the stale entry.
+
+```scrut {output_stream: stderr}
+$ cd $TMPDIR/baseline_prune && \
+> printf 'x: str = 1\nyyyy: int = 0\n' > bad.py && \
+> $PYREFLY check bad.py --baseline=baseline.json --prune-baseline --summary=none --output-format=omit-errors
+ INFO Removed 1 unused suppression from the baseline file
 [0]
 ```
 
@@ -82,8 +92,8 @@ The surviving entry keeps its existing concise description rather than refreshin
 it from the current error.
 
 ```scrut {output_stream: stdout}
-$ grep -c '"concise_description": "test"' $TMPDIR/baseline_prune/baseline.json
-1
+$ $JQ -c '.errors | map(.concise_description)' $TMPDIR/baseline_prune/baseline.json
+["test"]
 [0]
 ```
 

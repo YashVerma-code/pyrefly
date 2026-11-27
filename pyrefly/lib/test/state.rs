@@ -76,6 +76,169 @@ use crate::types::class::Class;
 use crate::types::types::Type;
 
 #[test]
+fn test_private_module_wildcard_visibility_changes() {
+    let mut env = TestEnv::new().enable_protected_access_error();
+    env.add("promoted", "_hidden: int = 1\n__all__ = ['_hidden']\n");
+    env.add("star_private", "from promoted import *\n");
+    env.add("consumer", "import star_private\nstar_private._hidden\n");
+    let (state, handle) = env.to_state();
+    for (own_all, expected) in [(false, 1), (true, 0), (false, 1)] {
+        let contents = if own_all {
+            "from promoted import *\n__all__ = ['_hidden']\n"
+        } else {
+            "from promoted import *\n"
+        };
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        transaction.as_mut().set_memory(vec![(
+            PathBuf::from("star_private.py"),
+            Some(Arc::new(FileContents::from_source(contents.to_owned()))),
+        )]);
+        transaction
+            .as_mut()
+            .run(&[handle("consumer")], Require::Everything, None);
+        state.commit_transaction(transaction, None);
+        let errors = state
+            .transaction()
+            .get_errors([&handle("consumer")])
+            .collect_errors();
+        assert_eq!(
+            errors
+                .ordinary
+                .iter()
+                .filter(|error| error.error_kind() == ErrorKind::ProtectedAccess)
+                .count(),
+            expected,
+            "own __all__: {own_all}"
+        );
+    }
+}
+
+#[test]
+fn test_private_module_composed_visibility_changes() {
+    for compose in [
+        "__all__ += provider.__all__",
+        "__all__.extend(provider.__all__)",
+    ] {
+        let mut env = TestEnv::new().enable_protected_access_error();
+        env.add(
+            "provider",
+            "_hidden: int = 1\n__all__: list[str] = ['_hidden']\n",
+        );
+        env.add("stable", "_hidden: int = 1\n__all__ = ['_hidden']\n");
+        env.add("facade", "import provider\nfrom stable import *\n");
+        env.add("consumer", "import facade\nfacade._hidden\n");
+        let (state, handle) = env.to_state();
+        let initial = state
+            .transaction()
+            .get_errors([&handle("consumer")])
+            .collect_errors();
+        assert_eq!(initial.ordinary.len(), 1);
+
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        transaction.as_mut().set_memory(vec![(
+            PathBuf::from("facade.py"),
+            Some(Arc::new(FileContents::from_source(format!(
+                "import provider\nfrom stable import *\n__all__ = ['provider']\n{compose}\n"
+            )))),
+        )]);
+        transaction
+            .as_mut()
+            .run(&[handle("consumer")], Require::Everything, None);
+        state.commit_transaction(transaction, None);
+        assert!(
+            state
+                .transaction()
+                .get_errors([&handle("consumer")])
+                .collect_errors()
+                .ordinary
+                .is_empty()
+        );
+
+        for (published, expected) in [(false, 1), (true, 0)] {
+            let contents = if published {
+                "_hidden: int = 1\n__all__: list[str] = ['_hidden']\n"
+            } else {
+                "_hidden: int = 1\n__all__: list[str] = []\n"
+            };
+            let mut transaction = state.new_committable_transaction(Require::Exports, None);
+            transaction.as_mut().set_memory(vec![(
+                PathBuf::from("provider.py"),
+                Some(Arc::new(FileContents::from_source(contents.to_owned()))),
+            )]);
+            transaction
+                .as_mut()
+                .run(&[handle("consumer")], Require::Everything, None);
+            state.commit_transaction(transaction, None);
+            let errors = state
+                .transaction()
+                .get_errors([&handle("consumer")])
+                .collect_errors();
+            assert_eq!(
+                errors.ordinary.len(),
+                expected,
+                "{compose}, published: {published}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_invalid_ignore_enabled_tools_config_reload() {
+    let root = TempDir::new().unwrap();
+    let config_path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
+    let source_path = root.path().join("main.py");
+    fs::write(
+        &source_path,
+        "x = 1  # pyrefly: ignoree  # pyright: ignoree\n",
+    )
+    .unwrap();
+    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
+    let handle = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::filesystem(source_path),
+        SysInfo::default(),
+    );
+    for (tools, severity, count) in [
+        ("['pyrefly']", "warn", 1),
+        ("[]", "warn", 0),
+        ("['pyright']", "error", 1),
+        ("['pyrefly', 'pyright']", "hint", 2),
+        ("['pyrefly', 'pyright']", "ignore", 0),
+        ("['pyrefly', 'pyright']", "warn", 2),
+        ("[]", "error", 0),
+    ] {
+        fs::write(
+            &config_path,
+            format!("skip-interpreter-query = true\nenabled-ignores = {tools}\n[errors]\ninvalid-ignore-comment = '{severity}'\n"),
+        )
+        .unwrap();
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction.as_mut().invalidate_config();
+        transaction
+            .as_mut()
+            .run(&[handle.dupe()], Require::Everything, None);
+        let errors = transaction
+            .as_mut()
+            .get_errors([&handle])
+            .collect_lsp_errors_with_baselines()
+            .0;
+        assert_eq!(errors.len(), count, "{tools}, {severity}: {errors:?}");
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.error_kind() == ErrorKind::InvalidIgnoreComment)
+        );
+        for error in errors {
+            assert_eq!(
+                error.severity().label().trim().to_ascii_lowercase(),
+                severity
+            );
+        }
+        state.commit_transaction(transaction, None);
+    }
+}
+
+#[test]
 fn test_use_shape_comments_and_stubs_config_reload() {
     let root = TempDir::new().unwrap();
     let config_path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
@@ -2104,6 +2267,38 @@ fn import_handle(transaction: &Transaction, handle: &Handle, module: &str) -> Ha
         .import_handle(handle, ModuleName::from_str(module), None)
         .finding()
         .unwrap()
+}
+
+/// Recursive imports can reach the same library file in two Python environments.
+#[test]
+fn test_recursive_library_in_distinct_environments() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["../lib_env"]);
+    fs::write(
+        root.join("lib").join(ConfigFile::PYREFLY_FILE_NAME),
+        "site-packages-path = ['../lib_env']\nsearch-path = ['../app']\nskip-interpreter-query = true\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("lib").join("mylib.py"),
+        "from main import g\ndef f(x: int):\n    if x <= 0:\n        return 0\n    return g(x - 1)\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app").join("main.py"),
+        "from mylib import f\ndef g(x: int):\n    return f(x)\n",
+    )
+    .unwrap();
+    let state = State::new(default_config_finder(None), "1".parse().unwrap());
+    let library = handle_from_module_path(
+        &state,
+        ModulePath::filesystem(root.join("lib").join("mylib.py")),
+    );
+    let mut transaction = state.new_transaction(Require::Exports, None);
+    transaction.run(&[library.dupe()], Require::Everything, None);
+    let errors = transaction.get_errors([&library]).collect_display_errors();
+    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
 }
 
 /// A library with its own config and environment, found through an app's site-package path, is

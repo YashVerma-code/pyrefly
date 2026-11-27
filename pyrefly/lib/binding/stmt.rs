@@ -1985,6 +1985,7 @@ impl<'a> BindingsBuilder<'a> {
                 self.scopes.mark_flow_termination(TerminationKind::Raise);
             }
             Stmt::Try(x) => {
+                self.scopes.enter_try();
                 // Handlers can observe writes made before an exception, not just entry values.
                 self.scopes.clear_excluded_none_pairs();
                 // A `finally` body that assigns attributes directly initializes them on the paths
@@ -2140,6 +2141,7 @@ impl<'a> BindingsBuilder<'a> {
                     self.scopes.restore_termination(termination);
                 }
                 self.scopes.exit_finally();
+                self.scopes.exit_try();
             }
             Stmt::Assert(x) => {
                 self.assert(x.range(), *x.test, x.msg.map(|m| *m));

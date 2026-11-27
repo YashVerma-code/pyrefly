@@ -256,8 +256,8 @@ testcase!(
 #   Variant1 {},
 # }
 class PyO3Enum:
-    class Variant0(PyO3Enum): ...
-    class Variant1(PyO3Enum): ...
+    class Variant0(PyO3Enum): ...  # E: `PyO3Enum` is uninitialized
+    class Variant1(PyO3Enum): ...  # E: `PyO3Enum` is uninitialized
 
 x: PyO3Enum = PyO3Enum.Variant0()
     "#,

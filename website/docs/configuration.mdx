@@ -229,7 +229,8 @@ or remove `project-excludes`.
     - For a file argument, or a directory argument without a config, the config's
       `project-excludes` do not apply. Pyrefly uses the default excludes and the excludes
       from the flags.
-    - `--force-exclude` skips each argument that the `project-excludes` of its config match.
+    - `--force-exclude` skips each argument that the `project-excludes` of its config match, and
+      each file argument that its `project-includes` do not match.
 - Equivalent configs: `exclude` in Pyright and mypy
 - Notes:
     - While not explicitly part of `project-excludes`, there are several patterns that are
@@ -561,6 +562,17 @@ these to match the environment you'll be running in.
 - Default: `false`
 - Flag equivalent: `--skip-interpreter-query`
 
+### `disable-pythonpath-warning`
+
+Don't warn that the `PYTHONPATH` environment variable is set when Pyrefly queries a
+Python interpreter during [Environment Autoconfiguration](#environment-autoconfiguration).
+The interpreter's `sys.path` includes the `PYTHONPATH` entries, so Pyrefly warns by default
+because checks in other environments may not include these paths.
+
+- Type: bool
+- Default: `false`
+- Flag equivalent: `--disable-pythonpath-warning`
+
 ### `typeshed-path`
 
 Override the version of typeshed that's being used for type checking. The provided
@@ -728,9 +740,8 @@ baseline-auto-update = true
     - A file edited again after being saved is left alone until the next save, so
       entries are never judged against unsaved text.
     - This setting affects the IDE only. Use `pyrefly check --prune-baseline` to
-      do the same thing across a whole project from the command line. Note that
-      `--prune-baseline` has no such condition: it removes every unused entry it
-      finds, whether or not new errors remain.
+      prune across the checked scope from the command line. CLI pruning is skipped
+      if any new diagnostic meets `--min-severity`.
 
 ### `min-severity`
 
@@ -925,7 +936,7 @@ The default Pyrefly configuration. Equivalent to having no preset at all.
 Enables additional error codes on top of the default for stricter checking.
 
 - Sets [`strict-callable-subtyping`](#strict-callable-subtyping) `= true`
-- Enables (as errors): [`direct-abstract-base-instantiation`](./error-kinds.mdx#direct-abstract-base-instantiation), [`implicit-any`](./error-kinds.mdx#implicit-any) (covers every implicit-`Any` sub-kind), [`instance-var-assign`](./error-kinds.mdx#instance-var-assign), [`method-assign`](./error-kinds.mdx#method-assign), [`missing-override-decorator`](./error-kinds.mdx#missing-override-decorator), [`open-unpacking`](./error-kinds.mdx#open-unpacking), [`possibly-uninitialized-attribute`](./error-kinds.mdx#possibly-uninitialized-attribute), [`potential-bad-keyword-argument`](./error-kinds.mdx#potential-bad-keyword-argument), [`property-type-mismatch`](./error-kinds.mdx#property-type-mismatch), [`unused-ignore`](./error-kinds.mdx#unused-ignore)
+- Enables or raises to errors: [`bad-descriptor-inheritance`](./error-kinds.mdx#bad-descriptor-inheritance), [`bad-override-descriptor`](./error-kinds.mdx#bad-override-descriptor), [`direct-abstract-base-instantiation`](./error-kinds.mdx#direct-abstract-base-instantiation), [`implicit-any`](./error-kinds.mdx#implicit-any) (covers every implicit-`Any` sub-kind), [`instance-var-assign`](./error-kinds.mdx#instance-var-assign), [`method-assign`](./error-kinds.mdx#method-assign), [`missing-override-decorator`](./error-kinds.mdx#missing-override-decorator), [`open-unpacking`](./error-kinds.mdx#open-unpacking), [`possibly-uninitialized-attribute`](./error-kinds.mdx#possibly-uninitialized-attribute), [`potential-bad-keyword-argument`](./error-kinds.mdx#potential-bad-keyword-argument), [`property-type-mismatch`](./error-kinds.mdx#property-type-mismatch), [`unused-ignore`](./error-kinds.mdx#unused-ignore)
 
 #### Preset: `all`
 
@@ -1146,6 +1157,18 @@ set `infer-return-types` to `"never"` in your config or pass it as a flag.
 - Type: one of `"never"`, `"annotated"`, `"checked"`
 - Default: `"checked"`
 - Flag equivalent: `--infer-return-types`
+
+### `legacy-generator-send-type`
+
+When Pyrefly infers a generator's return type, its send type defaults to `object`,
+including in generators that use `yield from`. Pyrefly does not infer the send type
+from delegates; use a return annotation such as `Generator[int, str | None]` to
+specify it. Set `legacy-generator-send-type = true` to use `Unknown` instead.
+Migration from mypy or Pyright enables the setting; migration from BasedPyright
+leaves it off.
+
+- Type: boolean
+- Default: `false`
 
 ### `infer-param-types-from-docstring`
 
@@ -1804,8 +1827,8 @@ Examples:
 `Sub-Configs` are a method for overriding one or more config options for specific files based on
 filepath glob matching. Only certain config options are allowed to be overridden, and a need
 to override other configs means you likely need to use a separate config file for your subdirectory.
-You can have as many SubConfigs as you want in a project, and even multiple separate SubConfigs
-that can apply to a given file when the `matches` glob pattern matches.
+You can have as many SubConfigs as you want in a project, and multiple SubConfigs can apply
+to the same file.
 
 #### **SubConfig Allowed Overrides**
 
@@ -1842,15 +1865,16 @@ and would like to see the option supported.
 
 A SubConfig has two or more entries:
 
-- a `matches` key, with a [Filesystem Glob](#filesystem-globbing) detailing which files the config
-  applies to.
+- a `matches` key with a [Filesystem Glob](#filesystem-globbing) string or a non-empty list of
+  strings, such as `matches = ["src/file.py", "tests/**"]`. The sub-config applies when any
+  pattern matches the file.
 - at least one of the [SubConfig allowed overrides](#subconfig-allowed-overrides)
 
 #### **SubConfig Option Selection**
 
 Since you can have more than one SubConfig matching a file, we need to define a resolution order
 to determine which SubConfig's option should be selected. Pyrefly does this by filtering
-SubConfigs whose `matches` does not match the given file, then takes the first non-null
+SubConfigs for which no `matches` pattern matches the file, then takes the first non-null
 value that can be found in the order the SubConfigs appear in your configuration.
 
 If no SubConfigs match, or there are no non-null config options present, then we take
@@ -1994,6 +2018,8 @@ python-version = "3.13"
 # is Pyrefly disallowed from querying for an interpreter to automatically determine your
 # `python-platform`, `python-version`, and extra entries to `site-packages-path`?
 skip-interpreter-query = false
+# don't warn when `PYTHONPATH` is set while querying an interpreter
+disable-pythonpath-warning = false
 # query the default Python interpreter on your system, if installed and `python_platform`,
 # `python-version`, or `site-packages-path` are unset.
 # python-interpreter-path = null # this is commented out because there are no `null` values in TOML

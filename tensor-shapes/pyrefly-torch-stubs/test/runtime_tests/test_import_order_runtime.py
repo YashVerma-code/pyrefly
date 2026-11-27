@@ -67,7 +67,8 @@ class ImportOrderTest(unittest.TestCase):
             assert torch.Tensor[2, 3] is torch.Tensor
             assert torch.nn.Conv2d[2, 3] is torch.nn.Conv2d
             assert not any(
-                type(finder).__name__ == "_PostImportHook" for finder in sys.meta_path
+                type(finder).__name__ == "_PostImportHook" and finder.name == "torch"
+                for finder in sys.meta_path
             )
             assert type(torch.__spec__.loader).__name__ != "_PostImportLoader"
             """

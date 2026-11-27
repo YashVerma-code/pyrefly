@@ -12,11 +12,15 @@ use pyrefly_derive::VisitMut;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::name::Name;
 use starlark_map::ordered_map::OrderedMap;
+use starlark_map::small_set::SmallSet;
 
+use crate::callable::DefaultValue;
+use crate::callable::Required;
 use crate::env::TypeEnv;
 use crate::function::FuncMetadata;
 use crate::function::FunctionKind;
 use crate::literal::Lit;
+use crate::quantified::QuantifiedKind;
 use crate::tuple::Tuple;
 use crate::types::CalleeKind;
 use crate::types::Type;
@@ -162,7 +166,7 @@ pub struct DataclassFieldKeywords {
     pub init: bool,
     /// This field's default, if any. Note that this is derived from the various
     /// default-related parameters but does not correspond directly to any of them
-    pub default: Option<Type>,
+    pub default: Option<DataclassFieldDefault>,
     /// None means that kw_only was not explicitly set
     pub kw_only: Option<bool>,
     /// Whether this field should have a corresponding parameter in `__init__` with the field name.
@@ -192,6 +196,8 @@ pub struct DataclassFieldKeywords {
     /// (or by Pydantic's `BeforeValidator`, `PlainValidator` or `WrapValidator`). Such a field
     /// may accept input that is not of its declared type.
     pub pydantic_has_custom_schema: bool,
+    /// The declaring Dagster resource metaclass rewrites this annotation before validation.
+    pub dagster_rewritten_annotation: bool,
 }
 
 impl DataclassFieldKeywords {
@@ -226,11 +232,61 @@ impl DataclassFieldKeywords {
             frozen: None,
             attrs_setattr_frozen: None,
             pydantic_has_custom_schema: false,
+            dagster_rewritten_annotation: false,
         }
     }
 
     pub fn is_kw_only(&self) -> bool {
         self.kw_only == Some(true)
+    }
+}
+
+/// A dataclass field default.
+#[derive(
+    Debug, Clone, PartialEq, Eq, TypeEq, TypeOrd, PartialOrd, Ord, Hash, Visit, VisitMut
+)]
+pub enum DataclassFieldDefault {
+    /// The field is optional, but the default's type is not known.
+    Unknown,
+    /// A default value of this type. Like a function parameter default, it may solve type
+    /// variables in the field's type.
+    Value { ty: Type, display: Option<String> },
+    /// A default factory that returns this type. It does not solve type variables, because the
+    /// factory is inferred without the field's type as context.
+    Factory(Type),
+}
+
+impl DataclassFieldDefault {
+    /// The recorded type, when there is one.
+    pub fn as_type(&self) -> Option<&Type> {
+        match self {
+            Self::Value { ty, .. } | Self::Factory(ty) => Some(ty),
+            Self::Unknown => None,
+        }
+    }
+
+    /// A default value is passed to call solving only when it can solve a type variable in the
+    /// parameter type.
+    pub fn to_required(&self, param_ty: &Type, env: &dyn TypeEnv) -> Required {
+        let Self::Value { ty, display } = self else {
+            return Required::Optional(None);
+        };
+        let mut default = DefaultValue {
+            ty: Some(ty.clone()),
+            display: display.clone(),
+        };
+        let mut quantifieds = SmallSet::new();
+        param_ty.collect_quantifieds(&mut quantifieds);
+        // A literal default of a shape dimension is not a solution of that dimension.
+        if quantifieds.is_empty()
+            || quantifieds
+                .iter()
+                .any(|q| q.kind() == QuantifiedKind::IntVar)
+        {
+            default.display = Some(default.fmt_default(env));
+            default.ty = None;
+        }
+        Required::Optional(Some(default))
     }
 }
 

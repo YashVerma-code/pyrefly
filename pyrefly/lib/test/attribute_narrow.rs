@@ -44,7 +44,7 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 def f(foo: Foo):
@@ -74,8 +74,8 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
-    y: Foo
+    x: "Foo"
+    y: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -91,8 +91,8 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
-    y: Foo
+    x: "Foo"
+    y: "Foo"
 class Bar(Foo):
     pass
 def f(foo: Foo):
@@ -106,7 +106,7 @@ testcase!(
     r#"
 from typing import assert_type
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 def f(foo: Foo):
@@ -125,7 +125,7 @@ testcase!(
     r#"
 from typing import assert_type
 class Foo:
-    x: Foo | None
+    x: "Foo | None"
 def f(foo: Foo):
     if foo.x is not None:
         assert_type(foo.x, Foo)
@@ -170,7 +170,7 @@ testcase!(
     r#"
 from typing import Any, assert_type, reveal_type
 class Foo:
-    x: Foo | None
+    x: "Foo | None"
 def f(foo: Foo):
     if foo.x is not None:
         assert_type(foo.x, Foo)
@@ -549,7 +549,7 @@ from typing import Any, Literal, assert_type
 class C:
     x: Any
     y: int | None
-    z: C | None
+    z: "C | None"
 def test_introduce_narrow_with_assignment(c0: C, c1: C):
     assert_type(c0.x, Any)
     assert_type(c0.y, int | None)
@@ -586,7 +586,7 @@ testcase!(
 from typing import Any, Literal, assert_type
 class C:
     x: Any
-    z: C | None
+    z: "C | None"
 def test_invalidate_narrow_with_assignment(c0: C, c1: C):
     assert isinstance(c0.z, C)
     assert isinstance(c0.z.x, int)
@@ -685,7 +685,7 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -701,7 +701,7 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -750,8 +750,8 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
-    y: Foo
+    x: "Foo"
+    y: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -770,7 +770,7 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -789,8 +789,8 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
-    y: Foo
+    x: "Foo"
+    y: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -809,8 +809,8 @@ testcase!(
     r#"
 from typing import reveal_type
 class Foo:
-    x: Foo
-    y: Foo
+    x: "Foo"
+    y: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -829,7 +829,7 @@ testcase!(
     r#"
 from typing import assert_type, Callable
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 def f(foo: Foo, condition: Callable[[], bool]):
@@ -849,7 +849,7 @@ testcase!(
     r#"
 from typing import assert_type, Callable
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 class Baz(Bar):
@@ -872,7 +872,7 @@ testcase!(
     r#"
 from typing import assert_type, Callable
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 class Baz(Foo):
@@ -892,7 +892,7 @@ testcase!(
     r#"
 from typing import assert_type, Callable
 class Foo:
-    x: Foo
+    x: "Foo"
 class Bar(Foo):
     pass
 def f(foo: Foo):

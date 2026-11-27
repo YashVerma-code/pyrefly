@@ -276,6 +276,29 @@ class C:
     x: Desc = Desc()  # instance attribute shadows the descriptor [bad-dataclass-descriptor]
 ```
 
+## bad-descriptor-inheritance
+
+Default severity: `warn`
+
+A descriptor's `__get__` return type is incompatible with a base class that has no getter.
+Widening the descriptor to that base type can hide its descriptor behavior when it is stored on a class.
+
+```python
+class A: ...
+
+class B(A):
+    def __get__(self, instance: object | None, owner: type[object]) -> int:  # incompatible with A
+        return 1
+```
+
+Every advertised getter return type, including class and instance overloads, must be assignable to each non-descriptor direct base.
+Returning `Self` preserves that contract. Bases with getters remain subject to ordinary override checks.
+This conservative signature check does not select overloads for a particular receiver or owner. Implementation-inheritance mixins may therefore require a named suppression or a different base.
+It checks declarations in checked files, not structural protocol assignments or unchecked third-party declarations; setter contracts and function method-binding behavior are outside its scope. Dynamic or unresolved getters and `Any` follow gradual typing.
+
+The check is a warning by default and an error in `strict` and `all`. Disable it with `bad-descriptor-inheritance = "ignore"` under `[errors]`.
+It is independently configurable: existing `bad-override` settings do not enable or disable it. Nominal subtyping is unchanged.
+
 ## bad-dunder-all
 
 This error occurs when `__all__` is explicitly defined for a module but contains an entry that cannot be found in the module's definitions, wildcard imports, or submodules (for `__init__.py` files).
@@ -398,7 +421,55 @@ That means everywhere that we call `Base.f` can safely call `Sub.f`.
 
 The opposite case, where `Base.f` takes `float` and `Sub.f` takes `int`, is an error because `Sub.f` cannot accept every `float` value.
 
-Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and some overrides involving mutable attributes are reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
+Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), some overrides involving mutable attributes are reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute), and compatibility checks requested by `@override` on normally exempt members are reported as [bad-override-explicit](#bad-override-explicit).
+
+## bad-override-descriptor
+
+Default severity: `ignore`
+
+A descriptor override has an incompatible type when accessed through the class, even if instance access is compatible.
+
+```python
+from typing import overload
+
+class Descriptor:
+    @overload
+    def __get__(self, instance: None, owner: type) -> str: ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> int: ...
+    def __get__(self, instance: object | None, owner: type) -> str | int: ...
+
+class Base:
+    value = Descriptor()
+
+class Child(Base):
+    value = 1  # Class access returns int rather than str
+```
+
+This check is ignored by default and enabled by the `strict` and `all` presets. Libraries that intentionally change class-access behavior can set `bad-override-descriptor = "ignore"` under `[errors]` without disabling instance override checks.
+It is a sub-kind of [bad-override](#bad-override): suppressing `bad-override` also suppresses this error.
+
+## bad-override-explicit
+
+Pyrefly normally allows incompatible overrides of `__init__`, `__new__`, `__init_subclass__`, and `__class__`.
+Adding `@override` explicitly requests compatibility checking for these members, including when the inherited definition comes from `object`.
+The same applies to `__call__` overrides of members inherited from non-Protocol classes; overrides of Protocol members are checked even without the decorator and use the ordinary override error codes.
+This error is enabled by default and covers both incompatible types and parameter names.
+
+```python
+from typing import override
+
+class Example:
+  @override
+  def __init_subclass__(cls, enabled: bool) -> None:  # Error
+    pass
+```
+
+Here, `object.__init_subclass__` accepts no `enabled` argument.
+Remove `@override` if you do not want to assert compatibility, or keep the decorator and suppress this check with `# pyrefly: ignore[bad-override-explicit]`.
+To disable it project-wide, set `bad-override-explicit = "ignore"` in the `[errors]` section of `pyrefly.toml`.
+Suppressing this error does not suppress other errors on the member, such as overriding a `@final` method.
+This is a sub-kind of [bad-override](#bad-override): suppressing `bad-override` also suppresses this error.
 
 ## bad-override-mutable-attribute
 
@@ -714,6 +785,21 @@ from . import helper
 # or: import pkg.helper
 ```
 
+## ignore-without-code
+
+Default severity: `ignore`
+
+A `# pyrefly: ignore` comment suppresses any error on its line without naming the specific error code(s) it silences. This rule is off by default; enable it to require every Pyrefly suppression to be explicit, so a blanket ignore can't silently hide a new, unrelated error introduced later. Only `# pyrefly: ignore` comments are checked, since Pyrefly only honors error codes for its own tool.
+
+```python
+def f() -> int:
+    return "oops"  # pyrefly: ignore  # ignore-without-code
+
+# Fix: name the error code being suppressed.
+def g() -> int:
+    return "oops"  # pyrefly: ignore[bad-return]
+```
+
 ## implicit-abstract-class
 
 Default severity: `ignore`
@@ -927,6 +1013,31 @@ class C:
         self.x = 0  # no error, `__init__` always executes
     def f(self):
         self.y = 0  # error, `y` may be undefined if `f` does not execute
+```
+
+## import-cycle
+
+Default severity: `ignore`
+
+A module imports itself through a chain of other first-party modules. For each
+group of modules that import each other, Pyrefly reports one shortest cycle, at
+an import in the module of the group whose name sorts first. Every import
+statement counts, including imports inside functions and under
+`if TYPE_CHECKING:`, and importing `a.b` also imports the package `a`. Imports
+of stub files and installed packages are not followed. Which imports count
+matches basedpyright's `reportImportCycles`, which can report several cycles
+for the same group.
+
+```python
+# a.py
+from b import g  # import-cycle: Import cycle: `a` -> `b` -> `a`
+
+def f() -> None: ...
+
+# b.py
+from a import f
+
+def g() -> None: ...
 ```
 
 ## inactive-code
@@ -1180,6 +1291,19 @@ types, invalid flags, and unrecognized specifications.
 f"{None:>10}"  # invalid-format-spec, if enabled
 f"{'text':.2f}"  # invalid-format-spec, if enabled
 f"{1:.2d}"  # invalid-format-spec, if enabled
+```
+
+## invalid-ignore-comment
+
+Default severity: `warn`
+
+Malformed ignore comments are flagged without changing their lenient suppression effects: misspelled tool directives (`# pyrefly: ignoree`), unterminated lists (`# pyrefly: ignore[bad-code`), and empty lists (`# pyrefly: ignore[]`). Identifier extensions in `# type: <identifier>` can be ordinary type comments, so they are not flagged as typos.
+
+```python
+x: int = "oops"  # pyrefly: ignoree  # invalid-ignore-comment: did you mean `ignore`?
+
+# Fix: use a valid directive.
+y: int = "oops"  # pyrefly: ignore[bad-assignment]
 ```
 
 ## invalid-inheritance
@@ -1978,8 +2102,8 @@ class Config:
 
 Default severity: `ignore`
 
-The `protected-access` error is reported when a protected class member, whose name starts with a
-single underscore, is accessed from outside its defining class or a subclass.
+The `protected-access` error checks protected class members outside their class hierarchy
+and private module names that are not exported in `__all__`.
 
 ```python
 class Service:
@@ -1988,7 +2112,7 @@ class Service:
 Service()._reset()  # protected-access
 ```
 
-Double-underscore private attributes are checked separately under [`no-access`](#no-access).
+Double-underscore private class attributes are checked separately under [`no-access`](#no-access).
 
 ## protocol-implicitly-defined-attribute
 
@@ -2314,6 +2438,18 @@ def takes_kwonly(*, x: int) -> int:
   ...
 
 takes_kwonly(1)  # should be `takes_kwonly(x=1)`!
+```
+
+## unhashable
+
+Default severity: `warn`
+
+A set element or dictionary key has a type that is not hashable, so building the
+set or dictionary raises `TypeError` at runtime.
+
+```python
+{[1, 2]}  # unhashable
+{[1, 2]: "a"}  # unhashable
 ```
 
 ## unimported-directive

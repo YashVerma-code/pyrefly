@@ -13,7 +13,6 @@ use ruff_annotate_snippets::Level as SnippetLevel;
 use ruff_annotate_snippets::Renderer as SnippetRenderer;
 use ruff_annotate_snippets::Snippet as SnippetBlock;
 
-use crate::solver::solver::CallableSubsetError;
 use crate::solver::solver::ParamsSubsetError;
 
 /// Parse byte ranges for parameters and return type from a signature string
@@ -158,13 +157,36 @@ fn param_range(
     Some((start - sig.params[index].len())..start)
 }
 
+/// The parts of two signatures that fail the assignability check.
+pub enum SignatureFailure<'a> {
+    /// The parameters fail as `params` describes, and the return types also fail if
+    /// `return_type` is set.
+    Params {
+        params: &'a ParamsSubsetError,
+        return_type: bool,
+    },
+    /// The parameters are compatible, but the return types are not.
+    Return,
+}
+
 type Spans = Vec<(Range<usize>, &'static str)>;
+
+fn join_spans(a: Option<(Spans, Spans)>, b: Option<(Spans, Spans)>) -> Option<(Spans, Spans)> {
+    match (a, b) {
+        (Some((mut exp_spans, mut found_spans)), Some((exp_more, found_more))) => {
+            exp_spans.extend(exp_more);
+            found_spans.extend(found_more);
+            Some((exp_spans, found_spans))
+        }
+        (a, b) => a.or(b),
+    }
+}
 
 /// The byte ranges of the expected and found signatures to annotate, with their labels.
 fn mismatch_spans(
     expected: &DisplayedSignature,
     found: &DisplayedSignature,
-    failure: Option<&CallableSubsetError>,
+    failure: Option<&SignatureFailure>,
 ) -> Option<(Spans, Spans)> {
     let (expected_params, expected_ret) = signature_parts(expected.text)?;
     let (found_params, found_ret) = signature_parts(found.text)?;
@@ -181,26 +203,23 @@ fn mismatch_spans(
     let params_diff = || diff(expected_params.clone(), found_params.clone(), "parameters");
     let return_diff = || diff(expected_ret.clone(), found_ret.clone(), "return type");
     match failure {
-        None => match (params_diff(), return_diff()) {
-            (Some((mut exp_spans, mut found_spans)), Some((exp_ret, found_ret))) => {
-                exp_spans.extend(exp_ret);
-                found_spans.extend(found_ret);
-                Some((exp_spans, found_spans))
-            }
-            (params, ret) => params.or(ret),
-        },
-        Some(CallableSubsetError::Return(_)) => return_diff(),
-        Some(CallableSubsetError::Params(ParamsSubsetError {
-            got_index,
-            want_index,
-            ..
-        })) => {
+        None => join_spans(params_diff(), return_diff()),
+        Some(SignatureFailure::Return) => return_diff(),
+        Some(SignatureFailure::Params {
+            params:
+                ParamsSubsetError {
+                    got_index,
+                    want_index,
+                    ..
+                },
+            return_type,
+        }) => {
             // `None` if the parameter cannot be located, `Some(None)` if there is no parameter.
             let locate = |sig, params_range, index: Option<usize>| match index {
                 Some(index) => param_range(sig, params_range, index).map(Some),
                 None => Some(None),
             };
-            match locate(expected, &expected_params, *want_index).zip(locate(
+            let params_spans = match locate(expected, &expected_params, *want_index).zip(locate(
                 found,
                 &found_params,
                 *got_index,
@@ -219,7 +238,8 @@ fn mismatch_spans(
                 // The failure is not attributed to individual parameters, or they cannot be
                 // located in the displayed signatures.
                 Some((None, None)) | None => params_diff(),
-            }
+            };
+            join_spans(params_spans, return_type.then(return_diff).flatten())
         }
     }
 }
@@ -241,7 +261,7 @@ fn mismatch_spans(
 pub fn render_signature_diff(
     expected: &DisplayedSignature,
     found: &DisplayedSignature,
-    failure: Option<&CallableSubsetError>,
+    failure: Option<&SignatureFailure>,
 ) -> Option<Vec<String>> {
     let (expected_spans, found_spans) = mismatch_spans(expected, found, failure)?;
 
@@ -622,6 +642,57 @@ class B(A):
         assert_eq!(messages[0], expected);
     }
 
+    /// Both the parameter and the return types are incompatible, so both are annotated.
+    #[test]
+    fn test_signature_diff_param_and_return() {
+        let messages = error_messages(
+            r#"
+class A:
+    def foo(self, x: int) -> int: ...
+
+class B(A):
+    def foo(self, x: str) -> str: ...
+"#,
+        );
+        assert_eq!(messages.len(), 1, "Expected one error, got {messages:?}");
+        let expected = r#"Class member `B.foo` overrides parent class `A` in an inconsistent manner
+  `B.foo` has type `(x: str) -> str`, which is not assignable to `(x: int) -> int`, the type of `A.foo`
+  Signature mismatch:
+  expected: def foo(self: B, x: int) -> int: ...
+                                ^^^     ^^^ return type
+                                |
+                                parameter
+  found:    def foo(self: B, x: str) -> str: ...
+                                ^^^     ^^^ return type
+                                |
+                                parameter"#;
+        assert_eq!(messages[0], expected);
+    }
+
+    /// Both a parameter and the return type are incompatible, but the return types mention a
+    /// type parameter, so only the parameter is annotated.
+    #[test]
+    fn test_signature_diff_generic_return() {
+        let messages = error_messages(
+            r#"
+class A:
+    def foo[T](self, x: int, y: T) -> T: ...
+
+class B(A):
+    def foo[T](self, x: str, y: T) -> list[T]: ...
+"#,
+        );
+        assert_eq!(messages.len(), 1, "Expected one error, got {messages:?}");
+        let expected = r#"Class member `B.foo` overrides parent class `A` in an inconsistent manner
+  `B.foo` has type `[T](x: str, y: T) -> list[T]`, which is not assignable to `[T](x: int, y: T) -> T`, the type of `A.foo`
+  Signature mismatch:
+  expected: def foo(self: B, x: int, y: T) -> T: ...
+                                ^^^ parameter
+  found:    def foo(self: B, x: str, y: T) -> list[T]: ...
+                                ^^^ parameter"#;
+        assert_eq!(messages[0], expected);
+    }
+
     /// Inferred (unannotated) return types: verifies signature diff works
     /// when return types have no explicit annotation.
     #[test]
@@ -642,9 +713,13 @@ class B(A):
   `B.foo` has type `(x: str) -> str`, which is not assignable to `(x: int) -> int`, the type of `A.foo`
   Signature mismatch:
   expected: def foo(self: B, x: int) -> int: ...
-                                ^^^ parameter
+                                ^^^     ^^^ return type
+                                |
+                                parameter
   found:    def foo(self: B, x: str) -> str: ...
-                                ^^^ parameter"#;
+                                ^^^     ^^^ return type
+                                |
+                                parameter"#;
         assert_eq!(messages[0], expected);
     }
 
@@ -668,9 +743,13 @@ class B(A):
   `B.foo` has type `(self: Unknown) -> None`, which is not assignable to `(x: int) -> int`, the type of `A.foo`
   Signature mismatch:
   expected: def foo(self: B, x: int) -> int: ...
-                             ^^^^^^ parameter
+                             ^^^^^^     ^^^ return type
+                             |
+                             parameter
   found:    (self: Unknown) -> None
-             ^^^^^^^^^^^^^ parameter"#;
+             ^^^^^^^^^^^^^     ^^^^ return type
+             |
+             parameter"#;
         assert_eq!(messages[0], expected);
     }
 
@@ -696,8 +775,11 @@ class B(A):
   `B.method` has type `() -> None`, which is not assignable to `(x: int) -> int`, the type of `A.method`
   Signature mismatch:
   expected: def method(self: B, x: int) -> int: ...
-                                ^^^^^^ parameter
-  found:    def method(self: Unknown) -> None: ..."#;
+                                ^^^^^^     ^^^ return type
+                                |
+                                parameter
+  found:    def method(self: Unknown) -> None: ...
+                                         ^^^^ return type"#;
         assert_eq!(messages[0], expected);
     }
 

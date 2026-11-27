@@ -159,6 +159,7 @@ use crate::error::context::ErrorContext;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
 use crate::error::style::ErrorStyle;
+use crate::export::exports::ExportLocation;
 use crate::export::special::SpecialExport;
 use crate::solver::solver::CallContext;
 use crate::solver::solver::QuantifiedHandle;
@@ -1159,6 +1160,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         &[],
                         errors,
                         Some(&context),
+                        true,
                     )
                     .and_then(|iter_ty| self.unwrap_iterable(&iter_ty))
                     .unwrap_or_else(|| {
@@ -1247,6 +1249,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 vec![iterable]
             }
             _ => {
+                if let Type::ClassType(cls) | Type::SelfType(cls) = iterable
+                    && let Some(generator) = self.as_superclass(cls, self.stdlib.generator_object())
+                    && let [_, send_ty, _] = generator.targs().as_slice()
+                    && !self.is_subset_eq(&Type::None, send_ty)
+                {
+                    // Iteration resumes the generator with `None`, not an explicit send value.
+                    self.error(
+                        errors,
+                        range,
+                        ErrorKind::NotIterable,
+                        format!(
+                            "Cannot iterate over `{}` because its send type `{}` does not accept `None`",
+                            self.display(iterable.clone()),
+                            self.display(send_ty.clone()),
+                        ),
+                    );
+                }
                 let ty = self
                     .unwrap_iterable(iterable)
                     .or_else(|| {
@@ -1260,6 +1279,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             &[],
                             errors,
                             Some(&context),
+                            true,
                         )
                     })
                     .unwrap_or_else(|| {
@@ -1615,10 +1635,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if !self.has_valid_annotation_syntax(expr, errors) {
             return TypeAlias::error(name.clone(), style);
         }
-        // Preserve exact class expressions through chains of legacy aliases.
+        // Preserve annotation metadata and exact class expressions through alias chains.
         let ty = if let Type::TypeAlias(alias) = &ty
-            && let value @ Type::SpecializedClassDef(_) =
-                self.get_type_alias(alias).as_value(self.stdlib)
+            && let value @ (Type::Annotated(..) | Type::SpecializedClassDef(_)) =
+                self.get_type_alias(alias).as_type_ref().clone()
         {
             value
         } else {
@@ -1967,8 +1987,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ty: &mut Type,
         visiting: &mut SmallSet<(ModuleName, TypeAliasIndex)>,
         recursive_refs: &mut SmallSet<Name>,
-    ) {
+    ) -> Option<Box<[Type]>> {
         match ty {
+            Type::Annotated(inner, metadata) => {
+                if let Some(inner_metadata) =
+                    self.expand_type_alias_refs_inner(inner, visiting, recursive_refs)
+                {
+                    let mut merged = inner_metadata.into_vec();
+                    merged.extend(std::mem::take(metadata).into_vec());
+                    *metadata = merged.into_boxed_slice();
+                }
+                None
+            }
             Type::UntypedAlias(f)
                 if let TypeAliasData::Ref(r) = &**f
                     && r.module_name == self.module().name() =>
@@ -1980,42 +2010,44 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // self-reference even when the cycle does not include the
                     // alias currently being resolved.
                     recursive_refs.insert(r.name.clone());
-                    return;
+                    return None;
                 }
                 let key_type_alias = KeyTypeAlias(r.index);
                 let idx = self
                     .bindings()
                     .key_to_idx_hashed_opt(Hashed::new(&key_type_alias))
                     .expect("same-module TypeAliasRef must have a corresponding KeyTypeAlias");
-                let ta = self.get_idx(idx);
-                // The body stored in KeyTypeAlias has already been through
-                // untype_opt during wrap_type_alias, so we just strip the
-                // Type::Type wrapper rather than re-running untype.
-                // Note: TypeAlias::error() and TypeAlias::unknown() store raw
-                // types (not wrapped in Type::Type), so we leave the Ref in
-                // place for those — the error is already reported elsewhere.
-                let mut body = match ta.as_type() {
-                    Type::Type(inner) => *inner,
-                    // If the body was an Annotated type, return it without the wrapper
-                    Type::Annotated(inner, _) => *inner,
-                    _ => return,
-                };
-                // Recursively expand any Refs in the inlined body, so that all nested
-                // alias bodies are inlined before we apply the outer substitution.
+                let mut aliased = self.get_idx(idx).as_type();
+                // Keep the wrapper during expansion so nested Annotated metadata can be
+                // collected without resolving aliases earlier than the cycle check.
+                if !matches!(aliased, Type::Type(_) | Type::Annotated(..)) {
+                    return None;
+                }
                 visiting.insert(key);
-                self.expand_type_alias_refs_inner(&mut body, visiting, recursive_refs);
+                self.expand_type_alias_refs_inner(&mut aliased, visiting, recursive_refs);
                 visiting.shift_remove(&key);
                 // Apply type arguments if the reference was parameterized.
-                // For generic aliases used without explicit args, promote_forall
-                // in untype_opt will have already injected implicit Any args.
                 if let Some(args) = &r.args {
-                    args.substitute_into_mut(&mut body);
+                    args.substitute_into_mut(&mut aliased);
                 }
-                *ty = body;
+                match aliased {
+                    Type::Type(inner) => {
+                        *ty = *inner;
+                        None
+                    }
+                    Type::Annotated(inner, metadata) => {
+                        *ty = *inner;
+                        Some(metadata)
+                    }
+                    _ => unreachable!("validated alias body must have a type wrapper"),
+                }
             }
-            _ => ty.recurse_mut(&mut |child: &mut Type| {
-                self.expand_type_alias_refs_inner(child, visiting, recursive_refs);
-            }),
+            _ => {
+                ty.recurse_mut(&mut |child: &mut Type| {
+                    self.expand_type_alias_refs_inner(child, visiting, recursive_refs);
+                });
+                None
+            }
         }
     }
 
@@ -2557,6 +2589,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 AnyStyle::Error | AnyStyle::MissingImport => self.error_unknown_from_error(
                     errors,
+                    target_range,
                     self.target_value_range(binding).unwrap_or(target_range),
                     format!("The type of `{name}`"),
                 ),
@@ -2571,9 +2604,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// The range of the expression that a loop, `with`, comprehension, unpacking or match capture
-    /// target takes its value from, if the binding records one. An `unknown-from-error` report on
-    /// the target is anchored there rather than at the target, so that a root error in that
-    /// expression lies within the report's range and explains it.
+    /// target takes its value from, if the binding records one. This is the causal span of
+    /// an `unknown-from-error` report, so a root error in the expression explains the target's
+    /// inferred type even when the diagnostic highlights the target.
     pub fn target_value_range(&self, binding: &Binding) -> Option<TextRange> {
         match binding {
             Binding::IterableValueLoop(_, e, _, _, _)
@@ -3707,6 +3740,39 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.error(errors, expect.attr.range(), error_kind, message);
     }
 
+    /// For Pyright compatibility, qualified access checks the name bound in the module.
+    /// Without an `__all__` export, binding `_sub` in a package's `__init__.py` makes
+    /// `pkg._sub` private, even though a from-import can resolve the same submodule
+    /// directly. `solve_import` therefore has different exclusions.
+    pub(super) fn check_private_module_attribute_access(
+        &self,
+        base: &Type,
+        attr: &Identifier,
+        errors: &ErrorCollector,
+    ) {
+        if !errors.is_active() {
+            return;
+        }
+        for ty in base.as_unions() {
+            if let Type::Module(module) = ty
+                && self
+                    .exports
+                    .private_export(ModuleName::from_parts(module.parts()), &attr.id)
+                    .is_some()
+            {
+                self.error(
+                    errors,
+                    attr.range,
+                    ErrorKind::ProtectedAccess,
+                    format!(
+                        "Private name `{}` is used outside of the module where it is defined",
+                        attr.id
+                    ),
+                );
+            }
+        }
+    }
+
     /// Populate parent methods map for find-references on reimplementations.
     /// This is done once per class before checking individual fields.
     /// Uses MRO to walk ALL ancestors (not just direct bases).
@@ -3781,6 +3847,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let class_bases = self.get_base_types_for_class(cls);
             let class_field_map = self.get_class_field_map(cls);
             self.check_consistent_override_for_class(cls, class_bases, &class_field_map, errors);
+            self.check_descriptor_inheritance(cls, class_bases, errors);
             self.check_variance_for_class(cls, class_bases, &class_field_map, errors);
             self.check_consistent_constructor(cls, errors);
             self.check_shape_flag_constructor_sources(cls, errors);
@@ -4743,6 +4810,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn binding_to_type_name_assign(
         &self,
         name: &Name,
+        name_range: TextRange,
         annot_key: Option<(AnnotationStyle, Idx<KeyAnnotation>)>,
         receiver_idx: Option<Idx<Key>>,
         expr: &Expr,
@@ -4783,14 +4851,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => self
                     .error_unknown_from_error(
                         errors,
+                        name_range,
                         expr.range(),
                         format!("The type of `{name}`"),
                     ),
-                Type::Any(AnyStyle::Explicit) => self.error_explicit_any_use(
-                    errors,
-                    expr.range(),
-                    format!("The type of `{name}`"),
-                ),
+                Type::Any(AnyStyle::Explicit) => {
+                    self.error_explicit_any_use(errors, name_range, format!("The type of `{name}`"))
+                }
                 _ if ty.contains_implicit_any() => {
                     self.error(
                         errors,
@@ -4944,22 +5011,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .map(|idx| self.get_idx(*idx).yield_ty.clone());
                         yield_tys.chain(yield_from_tys).collect()
                     });
-                    let any_implicit = self.heap.mk_any_implicit();
+                    // The send type is a default, not a type inferred from `yield from` delegates.
+                    let send_ty = self.default_generator_send_type();
                     if x.is_async {
                         self.heap
-                            .mk_class_type(self.stdlib.async_generator(yield_ty, any_implicit))
+                            .mk_class_type(self.stdlib.async_generator(yield_ty, send_ty))
                     } else {
-                        self.heap.mk_class_type(self.stdlib.generator(
-                            yield_ty,
-                            any_implicit,
-                            return_ty,
-                        ))
+                        self.heap
+                            .mk_class_type(self.stdlib.generator(yield_ty, send_ty, return_ty))
                     }
                 } else if x.is_async {
-                    let any_implicit = self.heap.mk_any_implicit();
+                    // As in `return_type_from_annotation`, the coroutine's `Any`s are explicit.
+                    let any_explicit = self.heap.mk_any_explicit();
                     self.heap.mk_class_type(self.stdlib.coroutine(
-                        any_implicit.clone(),
-                        any_implicit,
+                        any_explicit.clone(),
+                        any_explicit,
                         return_ty,
                     ))
                 } else {
@@ -5110,9 +5176,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .to_owned(),
                     );
                 }
-                Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => {
-                    self.error_unknown_from_error(errors, range, "The type of the returned value")
-                }
+                Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => self
+                    .error_unknown_from_error(
+                        errors,
+                        range,
+                        range,
+                        "The type of the returned value",
+                    ),
                 Type::Any(AnyStyle::Explicit) => {
                     self.error_explicit_any_use(errors, range, "The type of the returned value")
                 }
@@ -6282,6 +6352,46 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn solve_import(&self, x: &ImportBinding, errors: &ErrorCollector) -> Type {
         let m = x.module;
         let name = &x.name;
+        if errors.is_active()
+            && let Some(range) = x.check_deprecated
+            && let Some(export) = self.exports.private_export(m, name)
+        {
+            // Pyright checks the resolved import declaration, not just the package's
+            // bound name. A from-import can resolve `_sub` directly as a submodule,
+            // even when package attribute access sees a private binding.
+            // A __getattr__ fallback likewise supplies no imported declaration.
+            let has_declaration = match export {
+                ExportLocation::ThisModule(_) => true,
+                ExportLocation::OtherModule(source, original) => {
+                    if source == m
+                        && original.is_none()
+                        && self
+                            .exports
+                            .module_exists(m.append(name))
+                            .finding()
+                            .is_some()
+                    {
+                        false
+                    } else {
+                        self.exports
+                            .export_exists(source, original.as_ref().unwrap_or(name))
+                            || self
+                                .try_get_from_export(m, name.clone())
+                                .is_some_and(|ty| matches!(ty, Type::Module(_)))
+                    }
+                }
+            };
+            if has_declaration {
+                self.error(
+                    errors,
+                    x.original_name_range.unwrap_or(range),
+                    ErrorKind::ProtectedAccess,
+                    format!(
+                        "Private name `{name}` is used outside of the module where it is defined"
+                    ),
+                );
+            }
+        }
         let resolve_export = || {
             if let Some(range) = x.check_deprecated
                 && let Some(deprecation) = self.exports.get_deprecated(m, name)
@@ -6563,6 +6673,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // This should be the case since contextual typing requires working out the class field
         // type information first, but is difficult to see from a skim.
         let base = self.expr_infer(&attr.value, errors);
+        self.check_private_module_attribute_access(&base, &attr.attr, errors);
         self.record_attribute_definition_index(
             &base,
             &attr.attr.id,
@@ -7366,10 +7477,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         is_generator: bool,
     ) -> Type {
         if is_async && !is_generator {
-            let any_implicit = self.heap.mk_any_implicit();
+            // An `async def` returns `Coroutine[Any, Any, T]`, as typeshed writes it, so these
+            // `Any`s are explicit rather than unknown.
+            let any_explicit = self.heap.mk_any_explicit();
             self.heap.mk_class_type(self.stdlib.coroutine(
-                any_implicit.clone(),
-                any_implicit,
+                any_explicit.clone(),
+                any_explicit,
                 annotated_ty,
             ))
         } else {
@@ -7500,6 +7613,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Binding::NameAssign(x) => self.binding_to_type_name_assign(
                 &x.name,
+                x.name_range,
                 x.annotation,
                 x.receiver_idx,
                 &x.expr,
@@ -7721,6 +7835,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 ty
             }
+            Binding::FunctoolsWrapperMutation(b) => Lit::Bool(*b).to_implicit_type(),
         }
     }
 
@@ -7765,9 +7880,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
     }
 
+    fn default_generator_send_type(&self) -> Type {
+        if self.solver().config.legacy_generator_send_type {
+            self.heap.mk_any_implicit()
+        } else {
+            self.heap.mk_class_type(self.stdlib.object().clone())
+        }
+    }
+
     pub fn solve_yield(&self, x: &BindingYield, errors: &ErrorCollector) -> YieldResult {
         match x {
-            BindingYield::Yield(annot, x) => {
+            BindingYield::Yield {
+                annot,
+                infer_send,
+                expr: x,
+            } => {
                 // TODO: Keep track of whether the function is async in the binding, decompose hint
                 // appropriately instead of just trying both.
                 let annot = annot
@@ -7812,7 +7939,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     } else {
                         self.heap.mk_none()
                     };
-                    let send_ty = self.heap.mk_any_implicit();
+                    let send_ty = if *infer_send {
+                        self.default_generator_send_type()
+                    } else {
+                        self.heap.mk_any_implicit()
+                    };
                     YieldResult { yield_ty, send_ty }
                 }
             }
@@ -8040,10 +8171,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub(crate) fn untype_opt_with_context(
         &self,
+        ty: Type,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: UntypeContext,
+    ) -> Option<Type> {
+        self.untype_opt_impl(ty, range, errors, context, None)
+    }
+
+    fn untype_opt_impl(
+        &self,
         mut ty: Type,
         range: TextRange,
         errors: &ErrorCollector,
         context: UntypeContext,
+        annotated_metadata: Option<&mut Vec<Type>>,
     ) -> Option<Type> {
         if let Type::Forall(forall) = ty {
             ty = self.promote_forall(*forall, range, errors);
@@ -8057,11 +8199,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 Some(self.unions(ts))
             }
-            Type::Var(v) if let Some(_guard) = self.recurse(v) => self.untype_opt_with_context(
+            Type::Var(v) if let Some(_guard) = self.recurse(v) => self.untype_opt_impl(
                 self.solver().force_var(v, self),
                 range,
                 errors,
                 context,
+                annotated_metadata,
             ),
             // These are all legal type forms, so we accept them (return `Some`).
             // Only the quantified kinds get a kind check from the validator;
@@ -8112,7 +8255,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     unreachable!("guarded by matches! above")
                 };
                 let mut aliased_type =
-                    self.untype_opt_with_context(ta.as_type(), range, errors, context)?;
+                    self.untype_opt_impl(ta.as_type(), range, errors, context, annotated_metadata)?;
                 if let Type::Union(f) = &mut aliased_type {
                     f.display_name =
                         IdentityIgnored(Some((self.module().name(), (*ta.name).clone())));
@@ -8165,8 +8308,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.canonicalize_all_class_types(Type::ClassDef(cls), range, errors);
                 self.untype_opt_with_context(canonicalized, range, errors, context)
             }
-            // Annotated[T, meta] in annotation/type-alias context unwraps to T
-            Type::Annotated(t, _) => {
+            // Annotated[T, meta] in annotation/type-alias context unwraps to T.
+            Type::Annotated(t, metadata) => {
+                if let Some(out) = annotated_metadata {
+                    out.extend(metadata.into_vec());
+                }
                 Some(self.validate_untyped_type_var_context(*t, range, errors, context))
             }
             _ => None,
@@ -8454,6 +8600,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Expr::Attribute(attr) => {
                 let base = self.expr_with_options(&attr.value, ExprOptions::infer(errors, None));
+                self.check_private_module_attribute_access(base.ty(), &attr.attr, errors);
                 self.record_attribute_definition_index(
                     base.ty(),
                     &attr.attr.id,
@@ -8551,7 +8698,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let inferred = self
             .expr_infer_without_shape_comment(x, None, errors, Some(context))
             .into_ty();
-        let ty = self.untype_runtime_type(inferred, x.range(), context, errors);
+        let ty = self.untype_runtime_type(inferred, x.range(), context, errors, None);
         self.validate_type_form(ty, x.range(), context, errors)
     }
 
@@ -8560,6 +8707,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         x: &Expr,
         type_form_context: TypeFormContext<'_>,
         errors: &ErrorCollector,
+    ) -> Type {
+        self.expr_untype_impl(x, type_form_context, errors, None)
+    }
+
+    /// Untype the first argument to `Annotated`, retaining metadata from its outer wrapper.
+    pub(crate) fn expr_untype_annotated_arg(
+        &self,
+        x: &Expr,
+        context: TypeFormContext<'_>,
+        errors: &ErrorCollector,
+    ) -> (Type, Vec<Type>) {
+        let mut metadata = Vec::new();
+        let ty = self.expr_untype_impl(x, context, errors, Some(&mut metadata));
+        (ty, metadata)
+    }
+
+    fn expr_untype_impl(
+        &self,
+        x: &Expr,
+        type_form_context: TypeFormContext<'_>,
+        errors: &ErrorCollector,
+        annotated_metadata: Option<&mut Vec<Type>>,
     ) -> Type {
         let result = match x {
             // An `IntVar` default is a signed integer expression, not an ordinary type.
@@ -8591,7 +8760,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inferred_ty = self
                     .expr_infer_impl(x, None, errors, Some(type_form_context))
                     .into_ty();
-                self.untype_runtime_type(inferred_ty, x.range(), type_form_context, errors)
+                self.untype_runtime_type(
+                    inferred_ty,
+                    x.range(),
+                    type_form_context,
+                    errors,
+                    annotated_metadata,
+                )
             }
         };
         let result = self.validate_type_form(result, x.range(), type_form_context, errors);
@@ -8605,6 +8780,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         type_form_context: TypeFormContext<'_>,
         errors: &ErrorCollector,
+        annotated_metadata: Option<&mut Vec<Type>>,
     ) -> Type {
         if self.should_preserve_unpacked_map_int_tuples_call(&inferred_ty, type_form_context) {
             return inferred_ty;
@@ -8629,11 +8805,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ),
             );
         }
-        self.untype_opt_with_context(
+        self.untype_opt_impl(
             inferred_ty.clone(),
             range,
             errors,
             type_form_context.untype_context(),
+            annotated_metadata,
         )
         .unwrap_or_else(|| {
             self.error(

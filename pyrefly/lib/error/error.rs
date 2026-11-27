@@ -152,6 +152,9 @@ impl BaselineStatus {
 pub struct Error {
     module: Module,
     range: TextRange,
+    /// Where to look for errors explaining an `unknown-from-error` diagnostic. An assignment
+    /// highlights its target, but errors in its value explain the inferred type.
+    explanation_range: TextRange,
     display_range: DisplayRange,
     error_kind: ErrorKind,
     severity: Severity,
@@ -844,6 +847,7 @@ impl Error {
         Self {
             module,
             range,
+            explanation_range: range,
             display_range,
             error_kind,
             severity: error_kind.default_severity(),
@@ -854,6 +858,16 @@ impl Error {
             quick_fixes: Vec::new(),
             deprecated_tag: error_kind == ErrorKind::Deprecated,
         }
+    }
+
+    /// Keep the value's causal span separate from the diagnostic's primary highlight.
+    pub(crate) fn with_explanation_range(mut self, range: TextRange) -> Self {
+        self.explanation_range = range;
+        self
+    }
+
+    pub(crate) fn explanation_range(&self) -> TextRange {
+        self.explanation_range
     }
 
     /// Stop marking this error's range as deprecated in editors. Used when the range spans
@@ -882,6 +896,7 @@ impl Error {
     pub(crate) fn merge_if_same_diagnostic(&mut self, other: &Self) -> bool {
         if self.module != other.module
             || self.range != other.range
+            || self.explanation_range != other.explanation_range
             || self.display_range != other.display_range
             || self.error_kind != other.error_kind
             || self.severity != other.severity

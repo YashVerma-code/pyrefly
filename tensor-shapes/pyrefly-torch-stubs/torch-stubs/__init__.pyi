@@ -2249,6 +2249,9 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Linear interpolation. Shape inference via generic fixture signature."""
         ...
 
+    @overload
+    def fmod(self, other: _RealScalar) -> Tensor[Shape]: ...
+    @overload
     def fmod[OtherShape: _Shape](
         self, other: Tensor[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]:
@@ -4115,6 +4118,11 @@ def lerp[Shape: IntTuple, OtherShape: IntTuple](
     """Linear interpolation. Shape inference via generic fixture signature."""
     ...
 
+@overload
+def fmod[Shape: IntTuple](
+    input: Tensor[Shape], other: _RealScalar
+) -> Tensor[Shape]: ...
+@overload
 def fmod[Shape: IntTuple, OtherShape: IntTuple](
     input: Tensor[Shape], other: Tensor[OtherShape]
 ) -> Tensor[broadcast(Shape, OtherShape)]:
@@ -4440,6 +4448,14 @@ def matrix_rank[Batch: IntTuple, M: IntVar, N: IntVar](
 # TODO(stroxler): Infer the broadcast result shape.
 @overload
 def where(condition: Tensor[Any]) -> tuple[Tensor, ...]: ...
+@overload
+def where[Shape: IntTuple](
+    condition: Tensor[Shape],
+    input: Tensor[Shape],
+    other: Tensor[Shape],
+    *,
+    out: Tensor | None = None,
+) -> Tensor[Shape]: ...
 @overload
 def where[
     ConditionShape: IntTuple,

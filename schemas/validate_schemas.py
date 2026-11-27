@@ -96,6 +96,13 @@ class TestPositiveValidation(unittest.TestCase):
         validator = _make_validator(schema_file)
         validator.validate(config)
 
+    def test_sub_config_matches_as_array(self) -> None:
+        config = toml.loads('[[sub-config]]\nmatches = ["a.py", "src/**"]')
+        _make_validator(SCHEMAS_DIR / "pyrefly.json").validate(config)
+        _make_validator(SCHEMAS_DIR / "pyproject-tool-pyrefly.json").validate(
+            {"tool": {"pyrefly": config}}
+        )
+
     def test_legacy_site_package_path(self) -> None:
         config = {"site-package-path": ["site-packages"]}
         _make_validator(SCHEMAS_DIR / "pyrefly.json").validate(config)
@@ -183,6 +190,14 @@ NEGATIVE_TEST_CASES: list[tuple[str, str]] = [
     (
         "sub_config_entry_without_matches",
         "[[sub-config]]\npermissive-ignores = true",
+    ),
+    (
+        "sub_config_matches_empty_array",
+        "[[sub-config]]\nmatches = []",
+    ),
+    (
+        "sub_config_matches_non_string_items",
+        "[[sub-config]]\nmatches = [123]",
     ),
     # --- Conditional build-system validation ---
     (

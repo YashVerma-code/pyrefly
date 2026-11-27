@@ -9,6 +9,7 @@ pub mod attrs;
 pub mod class_field;
 pub mod class_metadata;
 pub mod classdef;
+pub mod dagster;
 pub mod dataclass;
 pub mod django;
 pub mod enums;

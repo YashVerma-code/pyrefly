@@ -200,6 +200,6 @@ from typing import Concatenate, Generic, ParamSpec
 P_co = ParamSpec("P_co", covariant=True)
 
 class C(Generic[P_co]):
-    def f(self, c: C[Concatenate[int, P_co]]): ...  # E: `P_co` is covariant but is used in contravariant position
+    def f(self, c: "C[Concatenate[int, P_co]]"): ...  # E: `P_co` is covariant but is used in contravariant position
     "#,
 );

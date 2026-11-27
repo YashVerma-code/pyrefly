@@ -1,0 +1,29 @@
+# < definition scip-python python snapshot-util 0.1 square_checks/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# This test case derives from `unittest.TestCase` through a base in another module.
+from shapes_cases import ShapesCase
+#    ^^^^^^^^^^^^ reference  snapshot-util 0.1 shapes_cases/__init__:
+#                        ^^^^^^^^^^ reference  snapshot-util 0.1 shapes_cases/ShapesCase#
+
+
+class SquareCase(ShapesCase):
+#     ^^^^^^^^^^ definition test  snapshot-util 0.1 square_checks/SquareCase#
+#     relationship implementation scip-python python snapshot-util 0.1 shapes_cases/ShapesCase#
+#                ^^^^^^^^^^ reference test  snapshot-util 0.1 shapes_cases/ShapesCase#
+    def test_square(self) -> None:
+#       ^^^^^^^^^^^ definition test  snapshot-util 0.1 square_checks/SquareCase#test_square().
+#                   ^^^^ definition test  snapshot-util 0.1 square_checks/SquareCase#test_square().(self)
+        self.assert_area(2, 2, 4)
+#       ^^^^ reference test  snapshot-util 0.1 square_checks/SquareCase#test_square().(self)
+#            ^^^^^^^^^^^ reference test  snapshot-util 0.1 shapes_cases/ShapesCase#assert_area().
+
+
+def unused() -> None:
+#   ^^^^^^ definition  snapshot-util 0.1 square_checks/unused().
+    pass
+

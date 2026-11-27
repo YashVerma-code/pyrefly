@@ -222,7 +222,6 @@ impl TestTspServer {
         queries: &[((u32, u32, u32, u32), bool)],
         snapshot: i32,
     ) {
-        let id = self.next_request_id();
         let queries: Vec<serde_json::Value> = queries
             .iter()
             .map(
@@ -237,6 +236,12 @@ impl TestTspServer {
                 },
             )
             .collect();
+        self.type_facts_raw(uri, queries, snapshot);
+    }
+
+    /// Send a `pyrefly/typeFacts` request with queries in their JSON form.
+    pub fn type_facts_raw(&mut self, uri: &str, queries: Vec<serde_json::Value>, snapshot: i32) {
+        let id = self.next_request_id();
         self.send_message(Message::Request(Request {
             id,
             method: "pyrefly/typeFacts".to_owned(),

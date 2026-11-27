@@ -175,7 +175,7 @@ f(C2[int])
 testcase!(
     test_recursive_base_used_as_metaclass,
     r#"
-class C(C):  # E: Class `C` inheriting from `C` creates a cycle
+class C(C):  # E: Class `C` inheriting from `C` creates a cycle  # E: `C` is uninitialized
     pass
 
 class D(C, _):  # E: Class `D` inheriting from `C` creates a cycle  # E: Could not find name `_`

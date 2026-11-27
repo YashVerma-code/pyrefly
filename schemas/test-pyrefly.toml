@@ -24,6 +24,7 @@ site-packages-path = ["venv/lib/python3.12/site-packages"]
 python-platform = "linux"
 python-version = "3.12.0"
 skip-interpreter-query = false
+disable-pythonpath-warning = false
 python-interpreter-path = "venv/bin/python3"
 python-interpreter-find-command = ["poetry", "env", "info", "-e"]
 conda-environment = "myenv"
@@ -33,6 +34,7 @@ typeshed-path = "/path/to/typeshed"
 # Type checking behavior
 untyped-def-behavior = "check-and-infer-return-type"
 infer-with-first-use = true
+legacy-generator-send-type = true
 use-shape-comments-and-stubs = false
 ignore-errors-in-generated-code = false
 disable-type-errors-in-ide = false

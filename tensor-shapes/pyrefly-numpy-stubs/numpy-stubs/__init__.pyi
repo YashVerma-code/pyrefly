@@ -675,7 +675,9 @@ class _Flags:
     c_contiguous: py_bool
     f_contiguous: py_bool
     owndata: py_bool
+    writeable: py_bool
     def __getitem__(self, key: str) -> py_bool: ...
+    def __setitem__(self, key: str, value: py_bool) -> None: ...
 
 class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
     shape: _ShapeT_co

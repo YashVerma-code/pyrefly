@@ -19,7 +19,6 @@ use starlark_map::ordered_map::OrderedMap;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::types::class_metadata::DataclassKind;
-use crate::binding::pydantic::GET_PYDANTIC_CORE_SCHEMA;
 use crate::module::typeshed::typeshed;
 use crate::types::class::Class;
 use crate::types::types::Type;
@@ -249,12 +248,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // BaseModel's built-in hook preserves model validation. Other hooks, model
                 // validators that replace the raw input, and `from_attributes` may accept any
                 // input.
-                if self
-                    .get_non_synthesized_class_member_and_defining_class(
-                        class_obj,
-                        &GET_PYDANTIC_CORE_SCHEMA,
-                    )
-                    .is_some_and(|member| !member.defining_class.is(KnownClass::PydanticBaseModel))
+                if self.pydantic_type_has_custom_schema(ty)
                     || metadata.dataclass_metadata().is_some_and(|dataclass| {
                         dataclass.pydantic_validator_replaces_all_input()
                             || dataclass

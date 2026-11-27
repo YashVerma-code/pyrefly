@@ -2491,11 +2491,19 @@ fn quickfix_remove_partially_unused_pyrefly_ignore_codes() {
 #[test]
 fn quickfix_remove_partially_unused_unclosed_codes_preserves_next_comment() {
     let code = "x: int = \"bad\"  # pyrefly: ignore [bad-assignment, unknown-name  # noqa\n";
-    let (title, after) = remove_unused_ignore_quickfix(code, "# pyrefly: ignore");
-    assert_eq!(title, "Remove unused suppression codes");
+    let position = TextSize::try_from(code.find("# pyrefly: ignore").unwrap()).unwrap();
+    assert!(remove_unused_ignore_results(TestEnv::new(), code, position).is_empty());
+    let (state, handle) = TestEnv::one("main", code)
+        .enable_unused_ignore_errors()
+        .to_state();
+    let errors = state.transaction().get_errors([&handle("main")]);
+    assert_eq!(errors.collect_errors().suppressed.len(), 1);
+    let display = errors.collect_display_errors_with_unused_ignores();
+    assert_eq!(display.len(), 1);
+    assert_eq!(display[0].error_kind(), ErrorKind::InvalidIgnoreComment);
     assert_eq!(
-        after,
-        "x: int = \"bad\"  # pyrefly: ignore [bad-assignment  # noqa\n"
+        display[0].module().code_at(display[0].range()),
+        "# pyrefly: ignore [bad-assignment, unknown-name  "
     );
 }
 

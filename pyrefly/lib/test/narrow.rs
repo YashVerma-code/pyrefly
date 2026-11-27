@@ -1402,6 +1402,20 @@ def f(cls: type[int], x: int | str) -> None:
 );
 
 testcase!(
+    test_is_not_instance_gradual_intersection,
+    r#"
+from typing import Any, reveal_type
+
+def f(found: list[Any]) -> None:
+    value = min(found, key=len)
+    reveal_type(value)  # E: revealed type: Sized & Any
+    if isinstance(value, str):
+        return
+    reveal_type(value)  # E: revealed type: Sized & Any
+    "#,
+);
+
+testcase!(
     test_is_not_instance_gradual_base,
     r#"
 from typing import Any, Self, TypedDict, assert_type
@@ -4312,7 +4326,7 @@ def f[T: str](x: T) -> TypeGuard[T]:
     return True
 
 def g(x: int | str):
-    if f(x):  # E: `int | str` is not assignable to upper bound `str` of type variable `T`
+    if f(x):  # E: While checking parameter `x`: `int | str` is not assignable to upper bound `str` of type variable `T`
         pass
     "#,
 );
@@ -5283,6 +5297,77 @@ def preserve_facets_and_subtypes(x: A, flag: bool) -> None:
         pass
     else:
         assert_type(x, A)
+    "#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/5546
+testcase!(
+    test_narrow_or_to_class_extending_any,
+    r#"
+from typing import Any, TypeGuard, reveal_type
+
+class C(Any):
+    pass
+
+def has(cls: type) -> TypeGuard[type[C]]:
+    return hasattr(cls, "tag")
+
+def has2(cls: type) -> TypeGuard[type[C]]:
+    return hasattr(cls, "tag")
+
+def is_c(x: object) -> TypeGuard[C]:
+    return True
+
+def repeated_guard(t: type[object]) -> None:
+    if has(t) or has(t):
+        reveal_type(t)  # E: revealed type: type[C]
+        t.tag
+
+def different_guards(t: type[object]) -> None:
+    if has(t) or has2(t):
+        reveal_type(t)  # E: revealed type: type[C]
+
+def instance_guard(x: object) -> None:
+    if is_c(x) or is_c(x):
+        reveal_type(x)  # E: revealed type: C
+
+def one_branch_does_not_narrow(t: type[object]) -> None:
+    if has(t) or isinstance(t, type):
+        reveal_type(t)  # E: revealed type: type[object]
+
+def gradual_base(x) -> None:
+    if isinstance(x, int) or isinstance(x, str):
+        reveal_type(x)  # E: revealed type: int | str
+
+class Holder:
+    t: type[object]
+
+def attribute(o: Holder) -> None:
+    if has(o.t) or has(o.t):
+        reveal_type(o.t)  # E: revealed type: type[C]
+
+def control_flow_merge(t: type[object], flag: bool) -> None:
+    if flag:
+        if not has(t):
+            return
+    else:
+        if not has2(t):
+            return
+    reveal_type(t)  # E: revealed type: type[C]
+
+def covering_branches(x: bool) -> None:
+    # The branches are `Literal[True]` and `Literal[False]`, which together cover `bool`.
+    if x or not x:
+        reveal_type(x)  # E: revealed type: bool
+
+blocked: list[str] = []
+
+def takes_int(x: int) -> None: ...
+
+def base_contains_any(x: int | Any | None) -> None:
+    if x is None or x in blocked:
+        return
+    takes_int(x)
     "#,
 );
 

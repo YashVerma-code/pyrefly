@@ -109,7 +109,7 @@ def names(value: StrawberryType | type):
     if isinstance(value, StrawberryUnion):
         reveal_type(value.graphql_name)  # E: revealed type: (str & Any) | (str & Unknown) | (Any & None) | (Unknown & None)
     elif isinstance(value, StrawberryList):
-        reveal_type(value.of_type)  # E: revealed type: (StrawberryType & Unknown) | (type[Any] & Unknown)
+        reveal_type(value.of_type)  # E: revealed type: (StrawberryType & Any) | (StrawberryType & Unknown) | (type[Any] & Any) | (type[Any] & Unknown)
 "#,
 );
 

@@ -25,6 +25,7 @@ use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
+use pyrefly_types::quantified::QuantifiedOrigin;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::simplify::intersect;
 use pyrefly_types::special_form::SpecialForm;
@@ -82,6 +83,7 @@ use crate::types::module::ModuleType;
 use crate::types::simplify::simplify_tuples_and_distribute_unpacking;
 use crate::types::simplify::unions;
 use crate::types::simplify::unions_with_literals;
+use crate::types::types::AnyStyle;
 use crate::types::types::Substitution;
 use crate::types::types::TParams;
 use crate::types::types::Type;
@@ -567,6 +569,7 @@ pub struct SolverConfig {
     pub strict_partial_subtyping: bool,
     pub spec_compliant_overloads: bool,
     pub legacy_overload_expansion: bool,
+    pub legacy_generator_send_type: bool,
     pub reveal_type_qualified_names: bool,
 }
 
@@ -1901,14 +1904,27 @@ impl Solver {
             bounds.lower.retain(|bound| !bound.is_placeholder());
             bounds.upper.retain(|bound| !bound.is_placeholder());
         }
-        // Prefer non-Any lower bound > upper bound > Any lower bound.
+        // An Any lower bound retains gradual behavior while the upper bound
+        // records the operations that the caller requires.
         // TODO(https://github.com/pyrefly-org/pyrefly/issues/105): consider using polarity to
         // determine whether we use the lower or upper bound.
         let lower_bound = self.solve_one_bounds(bounds.lower, env);
-        if lower_bound.as_ref().is_none_or(|b| b.is_any()) {
-            self.solve_one_bounds(bounds.upper, env).or(lower_bound)
-        } else {
-            lower_bound
+        if lower_bound.as_ref().is_some_and(|b| !b.is_any()) {
+            return lower_bound;
+        }
+        match (lower_bound, self.solve_one_bounds(bounds.upper, env)) {
+            (Some(lower), Some(upper)) if !lower.is_error() && !upper.is_any() => Some(unions(
+                upper
+                    .into_unions()
+                    .into_iter()
+                    .map(|upper| {
+                        intersect(vec![lower.clone(), upper.clone()], upper, env, &self.heap)
+                    })
+                    .collect(),
+                env,
+                &self.heap,
+            )),
+            (lower, upper) => upper.or(lower),
         }
     }
 
@@ -2383,7 +2399,16 @@ impl Solver {
                         err.push(e.clone());
                     }
                     let original_bounds = mem::take(bounds);
-                    if let Some(bound) = self.solve_bounds(original_bounds.clone(), env) {
+                    if let Some(mut bound) = self.solve_bounds(original_bounds.clone(), env) {
+                        // Once all arguments are matched, an implicit unknown supplies no
+                        // receiver-specific Self evidence. Keep its nominal contract without
+                        // replacing concrete evidence or an explicitly gradual answer.
+                        if matches!(bound, Type::Any(AnyStyle::Implicit))
+                            && q.identity().origin == QuantifiedOrigin::UnboundMethodSelf
+                            && let Restriction::Bound(fallback) = q.restriction()
+                        {
+                            bound = fallback.clone();
+                        }
                         if has_overload_captures {
                             solved_quantified_names_by_var.insert(v, q.name().clone());
                         }
@@ -2463,18 +2488,21 @@ impl Solver {
                 err.extend(branch.errors.iter().cloned());
             }
         }
-        for decision in overload_pruning_by_argument.values() {
+        for (argument, decision) in &overload_pruning_by_argument {
             let OverloadPruning::AllPruned(all_pruned_cause) = decision else {
                 continue;
             };
-            err.push(TypeVarSpecializationError::IncompatibleOverloadArgument {
-                solved_constraints: all_pruned_cause.solved_constraints.map(|constraint| {
-                    (
-                        constraint.quantified_name.clone(),
-                        constraint.solved_ty.clone(),
-                    )
-                }),
-            });
+            err.push(TypeVarSpecializationError::new(
+                TypeVarSpecializationErrorKind::IncompatibleOverloadArgument {
+                    solved_constraints: all_pruned_cause.solved_constraints.map(|constraint| {
+                        (
+                            constraint.quantified_name.clone(),
+                            constraint.solved_ty.clone(),
+                        )
+                    }),
+                },
+                Some(*argument),
+            ));
         }
 
         // A generic argument constrains a var if it constrains anything in the var's union-find
@@ -2925,7 +2953,13 @@ impl Solver {
 }
 
 #[derive(Debug, Clone)]
-pub enum TypeVarSpecializationError {
+pub struct TypeVarSpecializationError {
+    kind: TypeVarSpecializationErrorKind,
+    pub argument: Option<ArgumentKey>,
+}
+
+#[derive(Debug, Clone)]
+enum TypeVarSpecializationErrorKind {
     BadShapeExtensionSpecialization {
         name: Name,
         got: Type,
@@ -2953,19 +2987,25 @@ pub enum TypeVarSpecializationError {
 }
 
 impl TypeVarSpecializationError {
+    fn new(kind: TypeVarSpecializationErrorKind, argument: Option<ArgumentKey>) -> Self {
+        Self { kind, argument }
+    }
+
     pub fn error_kind(&self) -> ErrorKind {
-        match self {
-            Self::BadShapeExtensionSpecialization { .. }
-            | Self::ConflictingShapeExtensionSpecialization { .. }
-            | Self::BadBoundSpecialization { .. }
-            | Self::BadConstraintSpecialization { .. } => ErrorKind::BadSpecialization,
-            Self::IncompatibleOverloadArgument { .. } => ErrorKind::IncompatibleOverloadArgument,
+        use TypeVarSpecializationErrorKind::*;
+        match self.kind {
+            BadShapeExtensionSpecialization { .. }
+            | ConflictingShapeExtensionSpecialization { .. }
+            | BadBoundSpecialization { .. }
+            | BadConstraintSpecialization { .. } => ErrorKind::BadSpecialization,
+            IncompatibleOverloadArgument { .. } => ErrorKind::IncompatibleOverloadArgument,
         }
     }
 
     pub fn to_error_msg<Ans: LookupAnswer>(self, ans: &AnswersSolver<Ans>) -> String {
-        match self {
-            Self::BadShapeExtensionSpecialization {
+        use TypeVarSpecializationErrorKind::*;
+        match self.kind {
+            BadShapeExtensionSpecialization {
                 name,
                 got,
                 restriction,
@@ -2973,7 +3013,7 @@ impl TypeVarSpecializationError {
                 "`{}` is not a valid `{restriction}` value for type variable `{name}`",
                 ans.display(got),
             ),
-            Self::ConflictingShapeExtensionSpecialization {
+            ConflictingShapeExtensionSpecialization {
                 name,
                 selected,
                 constraint,
@@ -2984,7 +3024,7 @@ impl TypeVarSpecializationError {
                 restriction.kind_name(),
                 ans.display(selected),
             ),
-            Self::BadBoundSpecialization { name, got, want } => {
+            BadBoundSpecialization { name, got, want } => {
                 TypeCheckKind::TypeVarSpecialization(name).format_error(
                     ans,
                     &ans.for_display(got),
@@ -2992,7 +3032,7 @@ impl TypeVarSpecializationError {
                     ans.module().name(),
                 )
             }
-            Self::BadConstraintSpecialization { name, got, want } => {
+            BadConstraintSpecialization { name, got, want } => {
                 format!(
                     "`{}` is not assignable to any of constraints {} of type variable `{name}`",
                     ans.display(got),
@@ -3001,7 +3041,7 @@ impl TypeVarSpecializationError {
                         .join(", ")
                 )
             }
-            Self::IncompatibleOverloadArgument { solved_constraints } => {
+            IncompatibleOverloadArgument { solved_constraints } => {
                 format!(
                     "Overload type was not compatible with solved type variables: {}",
                     solved_constraints
@@ -3572,6 +3612,7 @@ impl<'subset> CallContext<'subset> {
         // boundary's already-recorded branches.
         self.matched_argument = Default::default();
         self.argument_side = Default::default();
+        self.argument = None;
         self.shape_extension_vars = Default::default();
         self.shape_extension_binding_source = None;
         self
@@ -3854,6 +3895,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         Some(argument.clone())
     }
 
+    fn specialization_error(
+        &self,
+        kind: TypeVarSpecializationErrorKind,
+    ) -> TypeVarSpecializationError {
+        TypeVarSpecializationError::new(kind, self.active_call_context.argument())
+    }
+
     fn quantified_satisfies_constraints(&mut self, q: &Quantified, constraints: &[Type]) -> bool {
         match q.restriction() {
             Restriction::Bound(b) => constraints.iter().any(|c| self.is_subset_eq(b, c).is_ok()),
@@ -3987,13 +4035,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 t1_p
             }
         };
-        match restriction {
+        let (answer, error) = match restriction {
             Restriction::Constraints(constraints) => {
                 // For constrained TypeVars, promote to the matching constraint type.
                 if let Type::Quantified(q_t1) = t1 {
                     let err =
                         (!self.quantified_satisfies_constraints(q_t1, constraints)).then(|| {
-                            TypeVarSpecializationError::BadConstraintSpecialization {
+                            TypeVarSpecializationErrorKind::BadConstraintSpecialization {
                                 name: q.name.clone(),
                                 got: t1.clone(),
                                 want: constraints.clone(),
@@ -4008,7 +4056,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 } else {
                     // `Any` falls through to here because it does not match a specific constraint.
                     let specialization_error = (!t1_p.is_any()).then(|| {
-                        TypeVarSpecializationError::BadConstraintSpecialization {
+                        TypeVarSpecializationErrorKind::BadConstraintSpecialization {
                             name: q.name().clone(),
                             got: t1_p.clone(),
                             want: constraints.clone(),
@@ -4027,7 +4075,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 });
                 let specialization_error = if !accepted {
                     Some(
-                        TypeVarSpecializationError::BadShapeExtensionSpecialization {
+                        TypeVarSpecializationErrorKind::BadShapeExtensionSpecialization {
                             name: q.name().clone(),
                             got: t1.clone(),
                             restriction: extension.clone(),
@@ -4037,7 +4085,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     && self.is_subset_eq(lower_bound, t1).is_err()
                 {
                     Some(
-                        TypeVarSpecializationError::ConflictingShapeExtensionSpecialization {
+                        TypeVarSpecializationErrorKind::ConflictingShapeExtensionSpecialization {
                             name: q.name().clone(),
                             selected: t1.clone(),
                             constraint: lower_bound.clone(),
@@ -4048,7 +4096,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     && self.is_subset_eq(t1, upper_bound).is_err()
                 {
                     Some(
-                        TypeVarSpecializationError::ConflictingShapeExtensionSpecialization {
+                        TypeVarSpecializationErrorKind::ConflictingShapeExtensionSpecialization {
                             name: q.name().clone(),
                             selected: t1.clone(),
                             constraint: upper_bound.clone(),
@@ -4076,7 +4124,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     if self.is_subset_eq(t1, &bound).is_err() {
                         // If the original type is also an error, use the promoted type.
                         let specialization_error =
-                            TypeVarSpecializationError::BadBoundSpecialization {
+                            TypeVarSpecializationErrorKind::BadBoundSpecialization {
                                 name: q.name().clone(),
                                 got: t1_p.clone(),
                                 want: bound,
@@ -4089,7 +4137,8 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     (t1_p.clone(), None)
                 }
             }
-        }
+        };
+        (answer, error.map(|kind| self.specialization_error(kind)))
     }
 
     fn is_shape_extension_binding_source(&self, q: &Quantified, v: Var) -> bool {
@@ -4328,11 +4377,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                                 if !self.quantified_satisfies_constraints(q_t2, &constraints) {
                                     self.solver.instantiation_errors.write().insert(
                                         *v1,
-                                        TypeVarSpecializationError::BadConstraintSpecialization {
-                                            name,
-                                            got: t2.clone(),
-                                            want: constraints,
-                                        },
+                                        self.specialization_error(
+                                            TypeVarSpecializationErrorKind::BadConstraintSpecialization {
+                                                name,
+                                                got: t2.clone(),
+                                                want: constraints,
+                                            },
+                                        ),
                                     );
                                 }
                             } else if let Some(constraint) =
@@ -4347,11 +4398,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                             } else if !t2.is_any() {
                                 self.solver.instantiation_errors.write().insert(
                                     *v1,
-                                    TypeVarSpecializationError::BadConstraintSpecialization {
-                                        name,
-                                        got: t2.clone(),
-                                        want: constraints,
-                                    },
+                                    self.specialization_error(
+                                        TypeVarSpecializationErrorKind::BadConstraintSpecialization {
+                                            name,
+                                            got: t2.clone(),
+                                            want: constraints,
+                                        },
+                                    ),
                                 );
                             }
                         } else {
@@ -4361,11 +4414,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                             if self.is_subset_eq(t2, &bound).is_err() {
                                 self.solver.instantiation_errors.write().insert(
                                     *v1,
-                                    TypeVarSpecializationError::BadBoundSpecialization {
-                                        name,
-                                        got: t2.clone(),
-                                        want: bound,
-                                    },
+                                    self.specialization_error(
+                                        TypeVarSpecializationErrorKind::BadBoundSpecialization {
+                                            name,
+                                            got: t2.clone(),
+                                            want: bound,
+                                        },
+                                    ),
                                 );
                             }
                         }
@@ -4790,6 +4845,7 @@ mod tests {
             strict_partial_subtyping: false,
             spec_compliant_overloads: false,
             legacy_overload_expansion: false,
+            legacy_generator_send_type: false,
             reveal_type_qualified_names: false,
         });
         let uniques = UniqueFactory::new();
@@ -4802,11 +4858,14 @@ mod tests {
             Restriction::Bound(bound.clone()),
         );
         // Stand in for argument matching, which records the first violation it finds.
-        let error = TypeVarSpecializationError::BadBoundSpecialization {
-            name: param.name().clone(),
-            got: Type::None,
-            want: bound,
-        };
+        let error = TypeVarSpecializationError::new(
+            TypeVarSpecializationErrorKind::BadBoundSpecialization {
+                name: param.name().clone(),
+                got: Type::None,
+                want: bound,
+            },
+            None,
+        );
         solver.variables.lock().insert_fresh(
             var,
             Variable::Answer {
@@ -4832,9 +4891,12 @@ mod tests {
 
         assert!(matches!(
             errors.as_slice(),
-            [TypeVarSpecializationError::BadBoundSpecialization {
-                got: Type::None,
-                ..
+            [TypeVarSpecializationError {
+                kind: TypeVarSpecializationErrorKind::BadBoundSpecialization {
+                    got: Type::None,
+                    ..
+                },
+                argument: None,
             }]
         ));
         assert!(
@@ -4980,11 +5042,14 @@ mod tests {
                     ty: Type::None,
                     frozen: false,
                     restricted: Some(Box::new(RestrictedAnswer {
-                        error: Some(TypeVarSpecializationError::BadBoundSpecialization {
-                            name: param.name().clone(),
-                            got: Type::None,
-                            want: Type::Var(inner),
-                        }),
+                        error: Some(TypeVarSpecializationError::new(
+                            TypeVarSpecializationErrorKind::BadBoundSpecialization {
+                                name: param.name().clone(),
+                                got: Type::None,
+                                want: Type::Var(inner),
+                            },
+                            None,
+                        )),
                         param,
                     })),
                 },

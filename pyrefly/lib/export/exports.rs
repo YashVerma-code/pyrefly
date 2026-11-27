@@ -11,6 +11,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use pyrefly_graph::calculation::Calculation;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::DocRanges;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::dunder;
@@ -70,6 +71,10 @@ pub trait LookupExport {
     /// import, not part of the module's public interface). Records a dependency
     /// on `name` from `module` regardless of if it exists.
     fn is_implicit_reexport(&self, module: ModuleName, name: &Name) -> bool;
+
+    /// Get an export that is private in the immediate module's namespace. Records a
+    /// dependency on the name's metadata, including its membership in an explicit `__all__`.
+    fn private_export(&self, module: ModuleName, name: &Name) -> Option<ExportLocation>;
 
     /// Check if an export is a special export. Records a dependency on `name` from `module` regardless of if it exists.
     fn is_special_export(&self, module: ModuleName, name: &Name) -> Option<SpecialExport>;
@@ -344,6 +349,39 @@ impl Exports {
         for name in other_defs.definitions.keys() {
             if !self_defs.definitions.contains_key(name) {
                 changed.0.names.entry(name.clone()).or_default();
+            }
+        }
+
+        let old_all = if self.definitions.dunder_all.kind == DunderAllKind::Specified {
+            self.wildcard.get()
+        } else {
+            None
+        };
+        let new_all = (other.definitions.dunder_all.kind == DunderAllKind::Specified)
+            .then(|| other.wildcard(lookup));
+        // Explicit __all__ can change privacy without changing the bound names.
+        for names in [
+            Some(&self.partially_known_dunder_all),
+            self.explicit_dunder_all_names.as_ref(),
+            old_all.as_deref(),
+            Some(&other.partially_known_dunder_all),
+            other.explicit_dunder_all_names.as_ref(),
+            new_all.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for name in names {
+                if !(Ast::is_protected_attr(name) || Ast::is_mangled_attr(name)) {
+                    continue;
+                }
+                let was_public = self.is_dunder_all_export(name)
+                    || old_all.as_ref().is_some_and(|all| all.contains(name));
+                let is_public = other.is_dunder_all_export(name)
+                    || new_all.as_ref().is_some_and(|all| all.contains(name));
+                if was_public != is_public {
+                    changed.0.names.entry(name.clone()).or_default().metadata = true;
+                }
             }
         }
 
@@ -637,6 +675,18 @@ impl Exports {
                 .is_some_and(|all| all.contains(name))
     }
 
+    /// Get an export whose bound name is private in this module's namespace.
+    pub fn private_export(&self, name: &Name, lookup: &dyn LookupExport) -> Option<ExportLocation> {
+        if !(Ast::is_protected_attr(name) || Ast::is_mangled_attr(name))
+            || self.is_dunder_all_export(name)
+            || (self.definitions.dunder_all.kind == DunderAllKind::Specified
+                && self.wildcard(lookup).contains(name))
+        {
+            return None;
+        }
+        self.exports(lookup).get(name).cloned()
+    }
+
     pub fn is_explicit_reexport(&self, name: &Name) -> bool {
         self.definitions
             .definitions
@@ -729,6 +779,10 @@ mod tests {
 
         fn is_implicit_reexport(&self, _module: ModuleName, _name: &Name) -> bool {
             false
+        }
+
+        fn private_export(&self, module: ModuleName, name: &Name) -> Option<ExportLocation> {
+            self.get(&module)?.private_export(name, self)
         }
 
         fn docstring_range(&self, _module: ModuleName, _name: &Name) -> Option<TextRange> {

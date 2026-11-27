@@ -191,6 +191,8 @@ pub struct PropertyMetadata {
     pub getter: Type,
     pub setter: Option<Type>,
     pub has_deleter: bool,
+    /// Retains subclass members without replacing the accessor signatures.
+    pub descriptor_class: Option<Box<ClassType>>,
 }
 
 impl PropertyMetadata {
@@ -206,6 +208,7 @@ impl PropertyMetadata {
             getter: getter.without_property_metadata(),
             setter: setter.map(|s| s.without_property_metadata()),
             has_deleter,
+            descriptor_class: None,
         }
     }
 }

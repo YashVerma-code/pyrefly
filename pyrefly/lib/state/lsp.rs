@@ -124,6 +124,9 @@ pub(crate) use fastapi_endpoint_support::EndpointModuleCache;
 mod pytest;
 mod quick_fixes;
 
+pub(crate) use self::quick_fixes::add_override::override_in_scope;
+pub(crate) use self::quick_fixes::implement_abstract_members::MemberRenderer;
+pub(crate) use self::quick_fixes::line_indent_and_start;
 pub(crate) use self::quick_fixes::move_module::MoveModuleMemberContext;
 pub(crate) use self::quick_fixes::types::LocalRefactorCodeAction;
 
@@ -934,8 +937,8 @@ impl<'a> Transaction<'a> {
             active_argument,
             ..
         } = self.get_callables_from_call(handle, position)?;
-        let callable = callables.get(chosen_overload_index.unwrap_or(0)).cloned()?;
-        let params = Self::normalize_singleton_function_type_into_params(callable)?;
+        let callable = &callables.get(chosen_overload_index.unwrap_or(0))?.callable;
+        let params = Self::normalize_singleton_function_type_into_params(callable.clone())?;
         let arg_index = Self::active_parameter_index(&params, &active_argument)?;
         let ty = params.get(arg_index)?.as_type().clone();
         Some(ty)
@@ -5016,8 +5019,8 @@ impl<'a> Transaction<'a> {
                 module,
             ));
         }
-        // Only callable parameters can be referenced by keyword arguments. Attributes, modules,
-        // and other variable kinds are covered by the regular reference indexes above.
+        // Only callable parameters need an AST scan for keyword arguments.
+        // Constructor keywords that refer to class fields use the attribute index.
         if is_parameter_definition {
             references.extend(self.keyword_argument_references_from_parameter_definition(
                 handle,
@@ -5031,12 +5034,16 @@ impl<'a> Transaction<'a> {
                 .get_solutions(handle)
                 .and_then(|solutions| solutions.get_index())
         {
-            references.extend(self.recorded_attribute_references(
-                handle,
-                &index.lock().slot_references,
-                module,
-                definition_range,
-            ));
+            let index = index.lock();
+            for attribute_references in [&index.slot_references, &index.keyword_argument_references]
+            {
+                references.extend(self.recorded_attribute_references(
+                    handle,
+                    attribute_references,
+                    module,
+                    definition_range,
+                ));
+            }
         }
         references.sort_by_key(|range| range.start());
         references.dedup();

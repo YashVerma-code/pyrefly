@@ -6,15 +6,18 @@
  */
 
 use std::borrow::Cow;
+use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fmt::Display;
 use std::fs;
+use std::iter::once;
 use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Once;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -55,8 +58,14 @@ use pyrefly_util::telemetry::TelemetrySourceDbRebuildInstanceStats;
 use pyrefly_util::telemetry::TelemetrySourceDbRebuildStats;
 use pyrefly_util::watch_pattern::WatchPattern;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 use serde::de::DeserializeOwned;
+use serde::de::Error as DeError;
+use serde::de::SeqAccess;
+use serde::de::Visitor;
+use serde::de::value::StrDeserializer;
 use serde_with::skip_serializing_none;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
@@ -64,6 +73,7 @@ use toml::Table;
 use toml::Value;
 use tracing::debug;
 use tracing::error;
+use tracing::warn;
 #[cfg(not(target_arch = "wasm32"))]
 use uv_pep440::Version;
 #[cfg(not(target_arch = "wasm32"))]
@@ -93,16 +103,95 @@ pub static GENERATED_FILE_CONFIG_OVERRIDE: LazyLock<
     RwLock<SmallMap<InternedPath, ArcId<ConfigFile>>>,
 > = LazyLock::new(|| RwLock::new(SmallMap::new()));
 
+/// One or more path patterns that select a sub-config.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct SubConfigMatches {
+    first: Glob,
+    rest: Vec<Glob>,
+}
+
+impl SubConfigMatches {
+    fn iter(&self) -> impl Iterator<Item = &Glob> {
+        once(&self.first).chain(&self.rest)
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        self.iter().any(|glob| glob.matches(path))
+    }
+}
+
+impl From<Glob> for SubConfigMatches {
+    fn from(first: Glob) -> Self {
+        Self {
+            first,
+            rest: Vec::new(),
+        }
+    }
+}
+
+impl Display for SubConfigMatches {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.rest.is_empty() {
+            self.first.fmt(f)
+        } else {
+            write!(f, "[{}]", self.iter().format(", "))
+        }
+    }
+}
+
+impl Serialize for SubConfigMatches {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.rest.is_empty() {
+            self.first.serialize(serializer)
+        } else {
+            serializer.collect_seq(self.iter())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SubConfigMatches {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MatchesVisitor;
+
+        impl<'de> Visitor<'de> for MatchesVisitor {
+            type Value = SubConfigMatches;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a path glob or a non-empty list of path globs")
+            }
+
+            fn visit_str<E: DeError>(self, value: &str) -> Result<Self::Value, E> {
+                Glob::deserialize(StrDeserializer::new(value)).map(SubConfigMatches::from)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let first = seq.next_element()?.ok_or_else(|| {
+                    A::Error::custom("sub-config `matches` must contain at least one path or glob")
+                })?;
+                let mut rest = Vec::new();
+                while let Some(glob) = seq.next_element()? {
+                    rest.push(glob);
+                }
+                Ok(SubConfigMatches { first, rest })
+            }
+        }
+
+        deserializer.deserialize_any(MatchesVisitor)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct SubConfig {
-    pub matches: Glob,
+    pub matches: SubConfigMatches,
     #[serde(flatten)]
     pub settings: ConfigBase,
 }
 
 impl SubConfig {
     fn rewrite_with_path_to_config(&mut self, config_root: &Path) {
-        self.matches = self.matches.clone().from_root(config_root);
+        for glob in once(&mut self.matches.first).chain(&mut self.matches.rest) {
+            *glob = glob.clone().from_root(config_root);
+        }
     }
 }
 
@@ -462,7 +551,7 @@ impl FallbackSearchPath {
     /// When we have a Dynamic variant, it only has meaning in the context of
     /// the provided path, so we can only (possibly) return a non-empty vec if the provided path
     /// is `Some`.
-    pub fn for_directory(&self, directory: Option<&Path>) -> Arc<Vec<PathBuf>> {
+    fn for_directory(&self, directory: Option<&Path>) -> Arc<Vec<PathBuf>> {
         match (self, directory) {
             (Self::Explicit(paths), _) => paths.dupe(),
             (Self::DirectoryRelative(s), Some(path)) => s.get_ancestors(path),
@@ -483,6 +572,19 @@ impl FallbackSearchPath {
             ),
             (Self::Empty, _) => "None".to_owned(),
         }
+    }
+
+    /// Whether this path is searched only after site packages, as a last resort whose results
+    /// carry a warning. Otherwise, it is searched before site packages, like the project root
+    /// that it stands in for.
+    pub fn is_last_resort(&self) -> bool {
+        matches!(self, Self::DirectoryRelative(_))
+    }
+
+    /// Whether the paths depend on the importing file, so import lookups that use them cannot
+    /// be shared between importing files.
+    pub fn depends_on_importing_file(&self) -> bool {
+        matches!(self, Self::DirectoryRelative(_))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -652,6 +754,10 @@ pub struct ConfigFile {
     /// Should we filter out the required excludes or filter things in your site package path?
     #[serde(default, skip_serializing_if = "crate::util::skip_default_false")]
     pub disable_project_excludes_heuristics: bool,
+
+    /// Should we skip warning that `PYTHONPATH` is set when we query an interpreter?
+    #[serde(default, skip_serializing_if = "crate::util::skip_default_false")]
+    pub disable_pythonpath_warning: bool,
 
     #[serde(skip)]
     pub search_path_from_args: Vec<PathBuf>,
@@ -876,6 +982,7 @@ impl Default for ConfigFile {
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
             disable_project_excludes_heuristics: false,
+            disable_pythonpath_warning: false,
             import_root: None,
             fallback_search_path: Default::default(),
             python_environment: Default::default(),
@@ -968,12 +1075,38 @@ impl ConfigFile {
         excludes.append(Self::required_project_excludes().globs());
         excludes.append(
             &self
-                .site_package_path_excluding_editable()
-                .filter(|p| !self.search_path().any(|r| r.starts_with(p)))
+                .third_party_site_package_path()
                 .filter_map(|p| Glob::new(p.to_string_lossy().to_string()).ok())
                 .collect::<Vec<_>>(),
         );
         excludes
+    }
+
+    /// The site-package paths that hold installed packages rather than project code: every
+    /// site-package path except PEP 610 editable roots and paths that contain a search path.
+    fn third_party_site_package_path(&self) -> impl Iterator<Item = &PathBuf> + Clone {
+        self.site_package_path_excluding_editable()
+            .filter(|p| !self.search_path().any(|r| r.starts_with(p)))
+    }
+
+    /// Whether `path` is in an installed package rather than in the project. A module checked in
+    /// another Python environment passes that environment's site-package path as `environment`,
+    /// which replaces the config's own, while the config's search path and editable roots still
+    /// hold project code.
+    pub fn is_third_party_path(&self, path: &Path, environment: Option<&[PathBuf]>) -> bool {
+        match environment {
+            None => self
+                .third_party_site_package_path()
+                .any(|site_package| path.starts_with(site_package)),
+            Some(site_package_path) => site_package_path.iter().any(|site_package| {
+                path.starts_with(site_package)
+                    && !self
+                        .python_environment
+                        .interpreter_editable_path
+                        .contains(site_package)
+                    && !self.search_path().any(|r| r.starts_with(site_package))
+            }),
+        }
     }
 
     /// The include globs the given scope selects.
@@ -1180,6 +1313,25 @@ impl ConfigFile {
         }
     }
 
+    /// The fallback search path, if search path heuristics are enabled. Module naming, import
+    /// lookup, and the import lookup path in errors read the fallback search path through this
+    /// method, so they agree on when it applies.
+    pub fn heuristic_fallback_search_path(&self) -> Option<&FallbackSearchPath> {
+        (!self.disable_search_path_heuristics).then_some(&self.fallback_search_path)
+    }
+
+    /// The fallback search path for a file in `directory`, or no paths if search path
+    /// heuristics are disabled.
+    pub fn fallback_search_path_for_directory(
+        &self,
+        directory: Option<&Path>,
+    ) -> Arc<Vec<PathBuf>> {
+        self.heuristic_fallback_search_path().map_or_else(
+            || Arc::new(Vec::new()),
+            |fallback| fallback.for_directory(directory),
+        )
+    }
+
     pub fn site_package_path(&self) -> impl Iterator<Item = &PathBuf> + Clone {
         // we can use unwrap here, because the value in the root config must
         // be set in `ConfigFile::configure()`.
@@ -1236,20 +1388,14 @@ impl ConfigFile {
         if !self.disable_search_path_heuristics {
             result.push(ImportLookupPathPart::ImportRoot(self.import_root.as_ref()));
         }
-        let fallback_search_path = (!self.disable_search_path_heuristics).then(|| {
-            ImportLookupPathPart::FallbackSearchPath(
-                &self.fallback_search_path,
-                origin.and_then(|p| p.parent()),
-            )
+        let fallback_search_path = self.heuristic_fallback_search_path().map(|fallback| {
+            ImportLookupPathPart::FallbackSearchPath(fallback, origin.and_then(|p| p.parent()))
         });
-        // A directory-relative fallback search path is only consulted when everything
-        // else fails, so it comes after the site package path.
         let (fallback_before_site_packages, fallback_after_site_packages) =
-            match self.fallback_search_path {
-                FallbackSearchPath::DirectoryRelative(_) => (None, fallback_search_path),
-                FallbackSearchPath::Explicit(_) | FallbackSearchPath::Empty => {
-                    (fallback_search_path, None)
-                }
+            if self.fallback_search_path.is_last_resort() {
+                (None, fallback_search_path)
+            } else {
+                (fallback_search_path, None)
             };
         result.extend(fallback_before_site_packages);
         result.push(ImportLookupPathPart::SitePackagePath(
@@ -1389,6 +1535,13 @@ impl ConfigFile {
         self.resolved(path)
             .settings
             .spec_compliant_overloads
+            .expect(RESOLVED_SETTING)
+    }
+
+    pub fn legacy_generator_send_type(&self, path: &ModulePath) -> bool {
+        self.resolved(path)
+            .settings
+            .legacy_generator_send_type
             .expect(RESOLVED_SETTING)
     }
 
@@ -1623,20 +1776,14 @@ impl ConfigFile {
                     .chain(self.site_package_path())
                     .chain(self.heuristic_search_path());
                 let path = module_path.as_path();
-                let module_kind = if self.disable_search_path_heuristics {
-                    ModuleName::from_path(path, search_paths, &self.extra_file_extensions)
-                        .map(ModuleNameWithKind::guaranteed)
-                        .unwrap_or(ModuleNameWithKind::guaranteed(ModuleName::unknown()))
-                } else {
-                    let fallback_paths = self.fallback_search_path.for_directory(Some(path));
-                    ModuleName::from_path_with_fallback(
-                        path,
-                        search_paths,
-                        fallback_paths.iter(),
-                        &self.extra_file_extensions,
-                    )
-                    .unwrap_or(ModuleNameWithKind::guaranteed(ModuleName::unknown()))
-                };
+                let fallback_paths = self.fallback_search_path_for_directory(path.parent());
+                let module_kind = ModuleName::from_path_with_fallback(
+                    path,
+                    search_paths,
+                    fallback_paths.iter(),
+                    &self.extra_file_extensions,
+                )
+                .unwrap_or(ModuleNameWithKind::guaranteed(ModuleName::unknown()));
                 Handle::from_with_module_name_kind(module_kind, module_path, self.get_sys_info())
             }
         }
@@ -1812,6 +1959,23 @@ impl ConfigFile {
         self.configure_at(None)
     }
 
+    /// Warns that `PYTHONPATH` is set, unless `disable-pythonpath-warning` is set. A queried
+    /// interpreter's `sys.path` includes the `PYTHONPATH` entries, so checks in other
+    /// environments may not find the same imports. `PYTHONPATH` is fixed for the lifetime of
+    /// the process, so the warning is emitted at most once.
+    fn warn_if_pythonpath_set(&self) {
+        static WARNED: Once = Once::new();
+        if !self.disable_pythonpath_warning
+            && let Ok(pythonpath) = env::var("PYTHONPATH")
+        {
+            WARNED.call_once(|| {
+                warn!(
+                    "PYTHONPATH environment variable is set to `{pythonpath}`. Checks in other environments may not include these paths. Set the `disable-pythonpath-warning` config option or pass `--disable-pythonpath-warning` to silence this warning."
+                )
+            });
+        }
+    }
+
     /// Configures this file using `project_root` for project-local discovery when its
     /// [`ConfigSource`] does not identify an on-disk root.
     ///
@@ -1902,6 +2066,9 @@ impl ConfigFile {
                     configure_errors.push(error.context("While finding Python interpreter"));
                 }
             }
+        }
+        if self.interpreters.python_interpreter_path.is_some() {
+            self.warn_if_pythonpath_set();
         }
 
         // A `typings/` directory under the project root is always a default
@@ -2218,14 +2385,14 @@ impl ConfigFile {
     }
 
     pub fn parse_config(config_str: &str) -> anyhow::Result<ConfigFile> {
-        parse_toml_document::<ConfigFile>(config_str)
+        parse_toml_document::<ConfigFile>(config_str, &[])
     }
 
     /// Parse a pyproject.toml file. Returns a tuple of:
     /// - `Option<ConfigFile>`: the pyrefly config, if `[tool.pyrefly]` was present
     /// - `bool`: whether Python tool sections like `[tool.ruff]` were detected
     fn parse_pyproject_toml(config_str: &str) -> anyhow::Result<(Option<ConfigFile>, bool)> {
-        let pyproject = parse_toml_document::<PyProject>(config_str)?;
+        let pyproject = parse_toml_document::<PyProject>(config_str, &["tool", "pyrefly"])?;
         let has_python_tools = pyproject.has_python_tools();
         Ok((pyproject.pyrefly(), has_python_tools))
     }
@@ -2405,8 +2572,46 @@ fn merge_config_layer(base: &mut toml::Table, child: toml::Table) {
     }
 }
 
-fn parse_toml_document<T: DeserializeOwned>(config_str: &str) -> anyhow::Result<T> {
-    toml_edit::de::from_str::<T>(config_str).map_err(anyhow::Error::new)
+fn parse_toml_document<T: DeserializeOwned>(
+    config_str: &str,
+    config_path: &[&str],
+) -> anyhow::Result<T> {
+    toml_edit::de::from_str::<T>(config_str).map_err(|err| {
+        let hint = duplicate_alias_hint(config_str, config_path, err.message());
+        let err = anyhow::Error::new(err);
+        match hint {
+            Some(hint) => err.context(hint),
+            None => err,
+        }
+    })
+}
+
+/// Serde only names the canonical field in a duplicate-field error. Recover the
+/// spellings from the config table, since other TOML tables may use the same keys.
+fn duplicate_alias_hint(config_str: &str, config_path: &[&str], message: &str) -> Option<String> {
+    let field = message
+        .strip_prefix("duplicate field `")?
+        .strip_suffix('`')?;
+    let document = toml_edit::Document::parse(config_str).ok()?;
+    let mut table: &dyn toml_edit::TableLike = document.as_table();
+    for key in config_path {
+        table = table.get(key)?.as_table_like()?;
+    }
+    let keys: Vec<_> = once(field)
+        .chain(
+            CONFIG_KEY_ALIASES
+                .iter()
+                .filter_map(|&(alias, canonical)| (canonical == field).then_some(alias)),
+        )
+        .filter(|key| table.contains_key(key))
+        .collect();
+    if keys.len() < 2 {
+        return None;
+    }
+    let spellings = keys.iter().map(|key| format!("`{key}`")).join(", ");
+    Some(format!(
+        "conflicting config keys: {spellings}; use only one spelling of `{field}`"
+    ))
 }
 
 /// The source span of the value responsible for a failed TOML parse of `T`, if
@@ -2563,6 +2768,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
 
+    use enum_iterator::all;
     use pretty_assertions::assert_eq;
     use pyrefly_build::source_db::LiveSourceDatabase;
     use pyrefly_python::module_path::ModuleStyle;
@@ -2892,6 +3098,7 @@ mod tests {
                 disable_search_path_heuristics: false,
                 enable_fallback_search_path: false,
                 disable_project_excludes_heuristics: false,
+                disable_pythonpath_warning: false,
                 import_root: None,
                 build_system: Default::default(),
                 use_ignore_files: true,
@@ -2951,6 +3158,7 @@ mod tests {
                     recursion_overflow_handler: None,
                     spec_compliant_overloads: None,
                     legacy_overload_expansion: None,
+                    legacy_generator_send_type: None,
                     treat_all_caps_as_final: None,
                     infer_param_types_from_docstring: None,
                 },
@@ -2960,7 +3168,7 @@ mod tests {
                 target_configs: Default::default(),
                 resolved_configs: Default::default(),
                 sub_configs: vec![SubConfig {
-                    matches: Glob::new("sub/project/**".to_owned()).unwrap(),
+                    matches: Glob::new("sub/project/**".to_owned()).unwrap().into(),
                     settings: ConfigBase {
                         preset: None,
                         extras: Default::default(),
@@ -2988,6 +3196,7 @@ mod tests {
                         recursion_overflow_handler: None,
                         spec_compliant_overloads: None,
                         legacy_overload_expansion: None,
+                        legacy_generator_send_type: None,
                         treat_all_caps_as_final: None,
                         infer_param_types_from_docstring: None,
                     }
@@ -3317,6 +3526,7 @@ mod tests {
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
             disable_project_excludes_heuristics: false,
+            disable_pythonpath_warning: false,
             import_root: None,
             use_ignore_files: true,
             script_command: None,
@@ -3340,7 +3550,7 @@ mod tests {
             resolved_configs: Default::default(),
             build_system: Default::default(),
             sub_configs: vec![SubConfig {
-                matches: Glob::new("sub/project/**".to_owned()).unwrap(),
+                matches: Glob::new("sub/project/**".to_owned()).unwrap().into(),
                 settings: Default::default(),
             }],
             coverage: CoverageConfig {
@@ -3412,6 +3622,7 @@ mod tests {
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
             disable_project_excludes_heuristics: false,
+            disable_pythonpath_warning: false,
             use_ignore_files: true,
             script_command: None,
             output_format: Some(OutputFormat::Json),
@@ -3426,7 +3637,7 @@ mod tests {
             target_configs: Default::default(),
             resolved_configs: Default::default(),
             sub_configs: vec![SubConfig {
-                matches: sub_config_matches,
+                matches: sub_config_matches.into(),
                 settings: Default::default(),
             }],
             coverage: CoverageConfig {
@@ -3477,6 +3688,33 @@ mod tests {
                 .severity(ErrorKind::UnusedParameter),
             Severity::Ignore
         );
+    }
+
+    #[test]
+    fn test_toml_parse_error_for_duplicate_config_alias() {
+        for (settings, expected_keys) in [
+            (
+                "site-packages-path = []\nsite-package-path = [\"stubs\"]\n",
+                "`site-packages-path`, `site-package-path`",
+            ),
+            (
+                "site_package_path = []\nsite-package-path = [\"stubs\"]\n",
+                "`site-package-path`, `site_package_path`",
+            ),
+        ] {
+            let standalone_error = ConfigFile::parse_config(settings).unwrap_err();
+            let pyproject_error =
+                ConfigFile::parse_pyproject_toml(&format!("[tool.pyrefly]\n{settings}"))
+                    .unwrap_err();
+            for error in [standalone_error, pyproject_error] {
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "conflicting config keys: {expected_keys}; use only one spelling of `site-packages-path`"
+                    ),
+                );
+            }
+        }
     }
 
     #[test]
@@ -3539,6 +3777,77 @@ mod tests {
                  "#;
         let err = ConfigFile::parse_config(config_str).unwrap_err();
         assert!(err.to_string().contains("missing field `matches`"));
+    }
+
+    #[test]
+    fn test_sub_config_matches_and_precedence() {
+        let root = TempDir::new().unwrap();
+        let config_path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
+        fs::write(
+            &config_path,
+            r#"
+ignore-errors-in-generated-code = false
+
+[[sub-config]]
+matches = "src/except.py"
+ignore-errors-in-generated-code = false
+
+[[sub-config]]
+matches = ["other/standalone.py", "src/**"]
+ignore-errors-in-generated-code = true
+"#,
+        )
+        .unwrap();
+        let (config, errors) = ConfigFile::from_file(&config_path);
+        assert!(errors.is_empty());
+        for (path, expected) in [
+            ("src/nested/generated.py", true),
+            ("src/except.py", false),
+            ("other/standalone.py", true),
+            ("other/generated.py", false),
+        ] {
+            let module_path = ModulePath::filesystem(root.path().join(path));
+            assert_eq!(
+                config.ignore_errors_in_generated_code(&module_path),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deserializing_sub_config_list() {
+        let config_str = "[[tool.pyrefly.sub-config]]\nmatches = [\"a.py\", \"src/**\"]\n";
+        let (config, _) = ConfigFile::parse_pyproject_toml(config_str).unwrap();
+        let config = config.unwrap();
+        let serialized = toml::to_string(&config).unwrap();
+        let round_trip = ConfigFile::parse_config(&serialized).unwrap();
+        assert_eq!(round_trip.sub_configs, config.sub_configs);
+    }
+
+    #[test]
+    fn test_deserializing_sub_config_empty_matches() {
+        let err = ConfigFile::parse_config("[[sub-config]]\nmatches = []\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("must contain at least one path or glob"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_deserializing_sub_config_invalid_glob() {
+        for matches in [r#""src/[a""#, r#"["a.py", "src/[a"]"#] {
+            let config_str = format!("[[sub-config]]\nmatches = {matches}\n");
+            let err = ConfigFile::parse_config(&config_str)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("While constructing glob pattern from src/[a"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -3734,12 +4043,13 @@ output-format = "omit-errors"
                 recursion_overflow_handler: None,
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
+                legacy_generator_send_type: None,
                 treat_all_caps_as_final: None,
                 infer_param_types_from_docstring: None,
             },
             sub_configs: vec![
                 SubConfig {
-                    matches: Glob::new("**/highest/**".to_owned()).unwrap(),
+                    matches: Glob::new("**/highest/**".to_owned()).unwrap().into(),
                     settings: ConfigBase {
                         replace_imports_with_any: Some(vec![
                             ModuleWildcard::new("highest").unwrap(),
@@ -3749,7 +4059,7 @@ output-format = "omit-errors"
                     },
                 },
                 SubConfig {
-                    matches: Glob::new("**/priority*".to_owned()).unwrap(),
+                    matches: Glob::new("**/priority*".to_owned()).unwrap().into(),
                     settings: ConfigBase {
                         replace_imports_with_any: Some(vec![
                             ModuleWildcard::new("second").unwrap(),
@@ -3807,7 +4117,7 @@ output-format = "omit-errors"
                 ..Default::default()
             },
             sub_configs: vec![SubConfig {
-                matches: Glob::new("**".to_owned()).unwrap(),
+                matches: Glob::new("**".to_owned()).unwrap().into(),
                 settings: ConfigBase {
                     errors: Some(ErrorDisplayConfig::new(HashMap::from([
                         (ErrorKind::BadAssignment, Severity::Warn),
@@ -3899,7 +4209,7 @@ output-format = "omit-errors"
                 ..Default::default()
             },
             sub_configs: vec![SubConfig {
-                matches: Glob::new("**".to_owned()).unwrap(),
+                matches: Glob::new("**".to_owned()).unwrap().into(),
                 settings: ConfigBase {
                     infer_with_first_use: Some(true),
                     ..Default::default()
@@ -4177,7 +4487,7 @@ output-format = "omit-errors"
                 ..Default::default()
             },
             sub_configs: vec![SubConfig {
-                matches: Glob::new("sub/**".to_owned()).unwrap(),
+                matches: Glob::new("sub/**".to_owned()).unwrap().into(),
                 settings: ConfigBase {
                     errors: Some(ErrorDisplayConfig::new(HashMap::from([(
                         ErrorKind::BadReturn,
@@ -4226,7 +4536,7 @@ output-format = "omit-errors"
                 ..Default::default()
             },
             sub_configs: vec![SubConfig {
-                matches: Glob::new("strict/**".to_owned()).unwrap(),
+                matches: Glob::new("strict/**".to_owned()).unwrap().into(),
                 settings: ConfigBase {
                     errors: Some(ErrorDisplayConfig::new(HashMap::from([(
                         ErrorKind::BadAssignment,
@@ -4258,7 +4568,7 @@ output-format = "omit-errors"
                 ..Default::default()
             },
             sub_configs: vec![SubConfig {
-                matches: Glob::new("sub/**".to_owned()).unwrap(),
+                matches: Glob::new("sub/**".to_owned()).unwrap().into(),
                 settings: ConfigBase {
                     check_unannotated_defs: Some(false),
                     ..Default::default()
@@ -4303,6 +4613,74 @@ output-format = "omit-errors"
             Severity::Ignore
         );
         assert_eq!(errors.severity(ErrorKind::UnboundName), Severity::Ignore);
+    }
+
+    #[test]
+    fn test_descriptor_override_severity_and_presets() {
+        let kind = ErrorKind::BadOverrideDescriptor;
+        let path = test_path("descriptor.py");
+        for preset in all::<Preset>() {
+            let mut config = ConfigFile {
+                root: ConfigBase {
+                    preset: Some(preset),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            config.configure();
+            let expected = match preset {
+                Preset::Strict | Preset::All => Severity::Error,
+                _ => Severity::Ignore,
+            };
+            assert_eq!(config.errors(&path).severity(kind), expected, "{preset}");
+        }
+        for (preset, parent, child, expected) in [
+            (
+                Preset::Strict,
+                None,
+                Some(Severity::Ignore),
+                Severity::Ignore,
+            ),
+            (Preset::Strict, None, Some(Severity::Warn), Severity::Warn),
+            (
+                Preset::Strict,
+                Some(Severity::Ignore),
+                None,
+                Severity::Ignore,
+            ),
+            (Preset::Strict, Some(Severity::Warn), None, Severity::Warn),
+            (
+                Preset::Strict,
+                Some(Severity::Error),
+                Some(Severity::Ignore),
+                Severity::Ignore,
+            ),
+            (Preset::Default, Some(Severity::Warn), None, Severity::Warn),
+            (
+                Preset::Default,
+                Some(Severity::Error),
+                None,
+                Severity::Error,
+            ),
+        ] {
+            let mut errors = ErrorDisplayConfig::default();
+            if let Some(severity) = parent {
+                errors.set_error_severity(ErrorKind::BadOverride, severity);
+            }
+            if let Some(severity) = child {
+                errors.set_error_severity(kind, severity);
+            }
+            let mut config = ConfigFile {
+                root: ConfigBase {
+                    preset: Some(preset),
+                    errors: Some(errors),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            config.configure();
+            assert_eq!(config.errors(&path).severity(kind), expected);
+        }
     }
 
     #[test]
@@ -4733,7 +5111,7 @@ output-format = "omit-errors"
                 ..Default::default()
             },
             sub_configs: vec![SubConfig {
-                matches: Glob::new("tests/**".to_owned()).unwrap(),
+                matches: Glob::new("tests/**".to_owned()).unwrap().into(),
                 settings: ConfigBase {
                     errors: Some(ErrorDisplayConfig::new(HashMap::from([(
                         ErrorKind::BadOverride,
@@ -5531,6 +5909,7 @@ output-format = "omit-errors"
                 recursion_overflow_handler: None,
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
+                legacy_generator_send_type: None,
                 treat_all_caps_as_final: None,
                 infer_param_types_from_docstring: None,
             },
@@ -5578,6 +5957,7 @@ output-format = "omit-errors"
                 recursion_overflow_handler: None,
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
+                legacy_generator_send_type: None,
                 treat_all_caps_as_final: None,
                 infer_param_types_from_docstring: None,
             },
@@ -6016,7 +6396,9 @@ matches = "generated/**"
         assert_eq!(config.coverage.includes, Some(shared_glob("covered")));
         assert_eq!(
             config.sub_configs[0].matches,
-            Glob::new(shared.join("generated/**").to_string_lossy().into_owned()).unwrap()
+            Glob::new(shared.join("generated/**").to_string_lossy().into_owned())
+                .unwrap()
+                .into()
         );
         assert_eq!(
             config.python_environment.site_package_path,

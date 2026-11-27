@@ -1120,6 +1120,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             getter: self.heap.mk_any_error(),
             setter: None,
             has_deleter: false,
+            descriptor_class: None,
         });
         self.heap.mk_function(Function {
             signature,

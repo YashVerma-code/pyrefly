@@ -196,7 +196,9 @@ impl SerializedError {
 
     /// Returns whether a suppression comment may be written for this error.
     pub fn is_suppressable(&self) -> bool {
-        !self.is_directive() && !self.is_unused_ignore()
+        !self.is_directive()
+            && !self.is_unused_ignore()
+            && self.name != ErrorKind::InvalidIgnoreComment.to_name()
     }
 }
 

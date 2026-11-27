@@ -1,0 +1,36 @@
+# < definition test scip-python python snapshot-util 0.1 test_shapes/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# pytest collects tests from this module, so all of it is test code.
+from shapes import area
+#    ^^^^^^ reference test  snapshot-util 0.1 shapes/__init__:
+#                  ^^^^ reference test  snapshot-util 0.1 shapes/area().
+
+
+def make_square(side: int) -> tuple[int, int]:
+#   ^^^^^^^^^^^ definition test  snapshot-util 0.1 test_shapes/make_square().
+#               ^^^^ definition test  snapshot-util 0.1 test_shapes/make_square().(side)
+#                     ^^^ reference test  python-stdlib 3.13 builtins/int#
+#                             ^^^^^ reference test  python-stdlib 3.13 builtins/tuple#
+#                                   ^^^ reference test  python-stdlib 3.13 builtins/int#
+#                                        ^^^ reference test  python-stdlib 3.13 builtins/int#
+    return side, side
+#          ^^^^ reference test  snapshot-util 0.1 test_shapes/make_square().(side)
+#                ^^^^ reference test  snapshot-util 0.1 test_shapes/make_square().(side)
+
+
+def test_area(side: int) -> None:
+#   ^^^^^^^^^ definition test  snapshot-util 0.1 test_shapes/test_area().
+#             ^^^^ definition test  snapshot-util 0.1 test_shapes/test_area().(side)
+#                   ^^^ reference test  python-stdlib 3.13 builtins/int#
+    assert area(*make_square(side)) == side * side
+#          ^^^^ reference test  snapshot-util 0.1 shapes/area().
+#                ^^^^^^^^^^^ reference test  snapshot-util 0.1 test_shapes/make_square().
+#                            ^^^^ reference test  snapshot-util 0.1 test_shapes/test_area().(side)
+#                                      ^^^^ reference test  snapshot-util 0.1 test_shapes/test_area().(side)
+#                                             ^^^^ reference test  snapshot-util 0.1 test_shapes/test_area().(side)
+

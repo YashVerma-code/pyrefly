@@ -155,12 +155,14 @@ ERROR * Module `pymsteams` has no type stubs or `py.typed` marker [untyped-impor
 ```scrut {output_stream: stdout}
 $ printf 'import pymsteams  # pyrefly: ignore[untyped-import-no-stubs]\n' > $TMPDIR/unknown_stubs/ignored.py && \
 > $PYREFLY check -c $TMPDIR/unknown_stubs/pyrefly.toml $TMPDIR/unknown_stubs/ignored.py --preset default --error unused-ignore --output-format=min-text
-[0]
+ERROR * Unused `# pyrefly: ignore` comment for code(s): untyped-import-no-stubs [unused-ignore] (glob)
+[1]
 ```
 
 ```scrut {output_stream: stdout}
 $ $PYREFLY check -c $TMPDIR/unknown_stubs/pyrefly.toml $TMPDIR/unknown_stubs/ignored.py --preset strict --error unused-ignore --output-format=min-text
-[0]
+ERROR * Unused `# pyrefly: ignore` comment for code(s): untyped-import-no-stubs [unused-ignore] (glob)
+[1]
 ```
 
 ## The `--preset` flag sets the preset and suppresses the upsell

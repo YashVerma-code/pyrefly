@@ -1096,7 +1096,40 @@ def test_corountine() -> Callable[[int], Coroutine[Any, Any, int]]:
 def test_awaitable() -> Callable[[int], Awaitable[int]]:
     return f
 def test_sync() -> Callable[[int], int]:
-    return f  # E: Returned type `(x: int) -> Coroutine[Unknown, Unknown, int]` is not assignable to declared return type `(int) -> int`
+    return f  # E: Returned type `(x: int) -> Coroutine[Any, Any, int]` is not assignable to declared return type `(int) -> int`
+"#,
+);
+
+testcase!(
+    test_plain_kwargs_optional_parameter_subtyping,
+    r#"
+from typing import Protocol
+class IntKwargs(Protocol):
+    def __call__(self, **kwargs: int) -> str: ...
+def implementation(*, label: str = "", **kwargs: int) -> str:
+    return label.upper()
+def compatible(*, label: int = 0, **kwargs: int) -> str:
+    return str(label)
+def widened(*, label: float = 0, **kwargs: int) -> str:
+    return str(label)
+# An IntKwargs caller may pass label=1, which fails in implementation at runtime.
+wrong: IntKwargs = implementation  # E: is not assignable to `IntKwargs`
+same_type: IntKwargs = compatible
+wider_type: IntKwargs = widened
+"#,
+);
+
+testcase!(
+    test_plain_kwargs_optional_parameter_override,
+    r#"
+class Parent:
+    def f(self, **kwargs: str) -> None: ...
+class NarrowOptional(Parent):
+    def f(self, *, verbose: bool = False, **kwargs: str) -> None: ...  # E: Class member `NarrowOptional.f` overrides parent class `Parent` in an inconsistent manner
+class CompatibleOptional(Parent):
+    def f(self, *, verbose: str = "", **kwargs: str) -> None: ...
+class WiderOptional(Parent):
+    def f(self, *, verbose: object = None, **kwargs: str) -> None: ...
 "#,
 );
 
@@ -1157,8 +1190,53 @@ class P4(Protocol):
     def __call__(self, **kwargs: int): ...
 def test(unannotated: P1, unpacked: P2, annotated: P3, annotated_wrong: P4):
     a: P2 = unannotated
-    b: P2 = annotated
+    # `TD` is not closed, so `P2` may be called with extra keyword arguments of type `object`.
+    b: P2 = annotated  # E: `P3` is not assignable to `P2`
     c: P2 = annotated_wrong  # E: `P4` is not assignable to `P2`
+"#,
+);
+
+// https://github.com/python/typing/pull/2338#issuecomment-5395279191
+testcase!(
+    test_override_unpack_kwargs_with_extra_keyword,
+    r#"
+from typing import TypedDict, Unpack
+
+class Person(TypedDict):
+    name: str
+    age: int
+
+class Base:
+    def foo(self, **kwargs: Unpack[Person]) -> None: ...
+class SubGood(Base):
+    # `Person` is not closed, so `Base.foo` accepts `extra` with any type.
+    def foo(self, *, name: str, age: int, extra: bool = False) -> None: ...  # E: `SubGood.foo` overrides parent class `Base` in an inconsistent manner
+"#,
+);
+
+// https://github.com/python/typing/pull/2338#issuecomment-5395279191
+// A non-closed TypedDict in `Unpack` behaves as if it had `extra_items=object`.
+testcase!(
+    test_assignability_unpack_kwargs_open_typed_dict_extra_items,
+    r#"
+from typing import Protocol, TypedDict, Unpack
+
+class TDBase(TypedDict):
+    x: int
+
+class TD(TDBase, total=False):
+    y: int
+
+def a1(**kwargs: Unpack[TDBase]) -> None: ...
+def a2(**kwargs: Unpack[TD]) -> None: ...
+
+class P1(Protocol):
+    def __call__(self, **kwargs: Unpack[TDBase]) -> None: ...
+class P2(Protocol):
+    def __call__(self, **kwargs: Unpack[TD]) -> None: ...
+
+x1: P1 = a2  # E: `(**kwargs: Unpack[TD]) -> None` is not assignable to `P1`
+x2: P2 = a1
 "#,
 );
 
@@ -1199,6 +1277,108 @@ def src(**kwargs: Unpack[TD]) -> None: ...
 # keyword names and could be called with keys the TypedDict does not permit.
 a: Untyped = src  # E: `(**kwargs: Unpack[TD]) -> None` is not assignable to `Untyped`
 b: Traditional = src  # E: `(**kwargs: Unpack[TD]) -> None` is not assignable to `Traditional`
+"#,
+);
+
+// https://github.com/python/typing/pull/2338
+testcase!(
+    test_assignability_typed_dict_kwargs_tails,
+    r#"
+from typing import Never, Protocol, ReadOnly, TypedDict, Unpack
+class Closed(TypedDict, closed=True):
+    x: int
+class Open(TypedDict):
+    x: int
+class ExtraInt(TypedDict, extra_items=int):
+    x: int
+class ExtraStr(TypedDict, extra_items=str):
+    x: int
+class ExtraObject(TypedDict, extra_items=ReadOnly[object]):
+    x: int
+class ExtraNever(TypedDict, extra_items=Never):
+    x: int
+class ClosedCall(Protocol):
+    def __call__(self, **kwargs: Unpack[Closed]) -> None: ...
+class OpenCall(Protocol):
+    def __call__(self, **kwargs: Unpack[Open]) -> None: ...
+class IntCall(Protocol):
+    def __call__(self, **kwargs: Unpack[ExtraInt]) -> None: ...
+class StrCall(Protocol):
+    def __call__(self, **kwargs: Unpack[ExtraStr]) -> None: ...
+class ObjectCall(Protocol):
+    def __call__(self, **kwargs: Unpack[ExtraObject]) -> None: ...
+class NeverCall(Protocol):
+    def __call__(self, **kwargs: Unpack[ExtraNever]) -> None: ...
+class FixedCall(Protocol):
+    def __call__(self, *, x: int) -> None: ...
+class TraditionalIntCall(Protocol):
+    def __call__(self, *, x: int, **kwargs: int) -> None: ...
+def test(closed: ClosedCall, open: OpenCall, ints: IntCall, strings: StrCall,
+         objects: ObjectCall, never: NeverCall, traditional: TraditionalIntCall) -> None:
+    fixed_closed: FixedCall = closed
+    fixed_never: FixedCall = never
+    closed_fixed: ClosedCall = fixed_closed
+    closed_never: ClosedCall = never
+    never_closed: NeverCall = closed
+    closed_ints: ClosedCall = ints
+    ints_closed: IntCall = closed  # E: `ClosedCall` is not assignable to `IntCall`
+    strings_ints: StrCall = ints  # E: `IntCall` is not assignable to `StrCall`
+    ints_strings: IntCall = strings  # E: `StrCall` is not assignable to `IntCall`
+    ints_objects: IntCall = objects
+    objects_ints: ObjectCall = ints  # E: `IntCall` is not assignable to `ObjectCall`
+    open_objects: OpenCall = objects
+    objects_open: ObjectCall = open
+    open_ints: OpenCall = ints  # E: `IntCall` is not assignable to `OpenCall`
+    ints_open: IntCall = open
+    traditional_ints: TraditionalIntCall = ints
+    ints_traditional: IntCall = traditional
+    open_traditional: OpenCall = traditional  # E: `TraditionalIntCall` is not assignable to `OpenCall`
+    closed_traditional: TraditionalIntCall = closed  # E: `ClosedCall` is not assignable to `TraditionalIntCall`
+"#,
+);
+
+testcase!(
+    test_assignability_typed_dict_kwargs_optional_keys,
+    r#"
+from typing import NotRequired, Protocol, TypedDict, Unpack
+class Base(TypedDict):
+    x: int
+class OptionalKey(Base):
+    y: NotRequired[int]
+class BaseCall(Protocol):
+    def __call__(self, **kwargs: Unpack[Base]) -> None: ...
+class OptionalCall(Protocol):
+    def __call__(self, **kwargs: Unpack[OptionalKey]) -> None: ...
+def test(base: BaseCall, optional: OptionalCall) -> None:
+    base_optional: BaseCall = optional  # E: `OptionalCall` is not assignable to `BaseCall`
+    optional_base: OptionalCall = base
+class Parent:
+    def f(self, **kwargs: Unpack[Base]) -> None: ...
+class NarrowOptional(Parent):
+    def f(self, **kwargs: Unpack[OptionalKey]) -> None: ...  # E: Class member `NarrowOptional.f` overrides parent class `Parent` in an inconsistent manner
+class DropKwargs(Parent):
+    def f(self, *, x: int, extra: bool = False) -> None: ...  # E: Class member `DropKwargs.f` overrides parent class `Parent` in an inconsistent manner
+class CompatibleOptional(Parent):
+    def f(self, *, x: int, y: object = None, **kwargs: object) -> None: ...
+class NarrowNamedOptional(Parent):
+    def f(self, *, x: int, y: int = 0, **kwargs: object) -> None: ...  # E: Class member `NarrowNamedOptional.f` overrides parent class `Parent` in an inconsistent manner
+"#,
+);
+
+testcase!(
+    test_assignability_typed_dict_kwargs_empty_destination,
+    r#"
+from typing import Protocol, TypedDict, Unpack
+class RequiredKey(TypedDict, closed=True):
+    x: int
+class Empty(TypedDict, closed=True):
+    pass
+class NoArgs(Protocol):
+    def __call__(self) -> None: ...
+def required(**kwargs: Unpack[RequiredKey]) -> None: ...
+def empty(**kwargs: Unpack[Empty]) -> None: ...
+a: NoArgs = required  # E: `(**kwargs: Unpack[RequiredKey]) -> None` is not assignable to `NoArgs`
+b: NoArgs = empty
 "#,
 );
 
@@ -2327,9 +2507,9 @@ callback: Callback = lambda **kwargs: (
 )[3]
 split_callback: SplitCallback = lambda consumed, **kwargs: (
     assert_type(consumed, int),
-    assert_type(kwargs, dict[str, str]),
-    assert_type(kwargs["remaining"], str),
-    assert_type(kwargs["consumed"], str),
+    assert_type(kwargs, dict[str, object]),
+    assert_type(kwargs["remaining"], object),
+    assert_type(kwargs["consumed"], object),
     None,
 )[4]
 generic_callback: GenericCallback = generic
@@ -2341,13 +2521,14 @@ apply(source, lambda **kwargs: (
 )[3])
 apply(split_source, lambda consumed, **kwargs: (
     assert_type(consumed, int),
-    assert_type(kwargs, dict[str, str]),
-    assert_type(kwargs["remaining"], str),
-    assert_type(kwargs["consumed"], str),
+    assert_type(kwargs, dict[str, object]),
+    assert_type(kwargs["remaining"], object),
+    assert_type(kwargs["consumed"], object),
     None,
 )[4])
-plain_callback: SplitCallback = split_plain
-apply(split_source, split_plain)
+# `SplitOptions` is not closed, so its extra items of type `object` are not assignable to `str`.
+plain_callback: SplitCallback = split_plain  # E: is not assignable to `SplitCallback`
+apply(split_source, split_plain)  # E: is not assignable to parameter `g`
 "#,
 );
 

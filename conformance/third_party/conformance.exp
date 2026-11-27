@@ -1484,6 +1484,17 @@
       "severity": "error",
       "stop_column": 59,
       "stop_line": 66
+    },
+    {
+      "code": -2,
+      "column": 47,
+      "concise_description": "`BadAlias21` is uninitialized",
+      "description": "`BadAlias21` is uninitialized",
+      "line": 66,
+      "name": "unbound-name",
+      "severity": "error",
+      "stop_column": 57,
+      "stop_line": 66
     }
   ],
   "aliases_variance.py": [
@@ -1534,6 +1545,17 @@
   ],
   "annotations_coroutines.py": [],
   "annotations_forward_refs.py": [
+    {
+      "code": -2,
+      "column": 7,
+      "concise_description": "`ClassA` is uninitialized",
+      "description": "`ClassA` is uninitialized",
+      "line": 22,
+      "name": "unbound-name",
+      "severity": "error",
+      "stop_column": 13,
+      "stop_line": 22
+    },
     {
       "code": -2,
       "column": 12,
@@ -1742,6 +1764,17 @@
       "severity": "error",
       "stop_column": 16,
       "stop_line": 55
+    },
+    {
+      "code": -2,
+      "column": 26,
+      "concise_description": "`ClassB` is uninitialized",
+      "description": "`ClassB` is uninitialized",
+      "line": 65,
+      "name": "unbound-name",
+      "severity": "error",
+      "stop_column": 32,
+      "stop_line": 65
     },
     {
       "code": -2,
@@ -3416,10 +3449,10 @@
     {
       "code": -2,
       "column": 9,
-      "concise_description": "Class member `ChildC2.__init__` overrides parent class `ParentC` in an inconsistent manner",
-      "description": "Class member `ChildC2.__init__` overrides parent class `ParentC` in an inconsistent manner\n  `ChildC2.__init__` has type `(x: str) -> None`, which is not assignable to `(x: int) -> None`, the type of `ParentC.__init__`\n  Signature mismatch:\n  expected: def __init__(self: ChildC2, x: int) -> None: ...\n                                           ^^^ parameter\n  found:    def __init__(self: ChildC2, x: str) -> None: ...\n                                           ^^^ parameter",
+      "concise_description": "Class member `ChildC2.__init__` overrides parent class `ParentC` in an inconsistent manner; compatibility is checked because this member is decorated with `@override`",
+      "description": "Class member `ChildC2.__init__` overrides parent class `ParentC` in an inconsistent manner; compatibility is checked because this member is decorated with `@override`\n  `ChildC2.__init__` has type `(x: str) -> None`, which is not assignable to `(x: int) -> None`, the type of `ParentC.__init__`\n  Signature mismatch:\n  expected: def __init__(self: ChildC2, x: int) -> None: ...\n                                           ^^^ parameter\n  found:    def __init__(self: ChildC2, x: str) -> None: ...\n                                           ^^^ parameter",
       "line": 135,
-      "name": "bad-override",
+      "name": "bad-override-explicit",
       "severity": "error",
       "stop_column": 17,
       "stop_line": 135
@@ -3427,10 +3460,10 @@
     {
       "code": -2,
       "column": 9,
-      "concise_description": "Class member `ChildC2.__new__` overrides parent class `ParentC` in an inconsistent manner",
-      "description": "Class member `ChildC2.__new__` overrides parent class `ParentC` in an inconsistent manner\n  `ChildC2.__new__` has type `[Self@ChildC2: ChildC2](cls: type[Self@ChildC2], x: str) -> ChildC2`, which is not assignable to `(cls: type[ChildC2], x: int) -> ParentC`, the type of `ParentC.__new__`\n  Signature mismatch:\n  expected: def __new__(cls: type[ChildC2], x: int) -> ParentC: ...\n                                               ^^^ parameter\n  found:    def __new__(cls: type[Self@ChildC2], x: str) -> ChildC2: ...\n                                                    ^^^ parameter",
+      "concise_description": "Class member `ChildC2.__new__` overrides parent class `ParentC` in an inconsistent manner; compatibility is checked because this member is decorated with `@override`",
+      "description": "Class member `ChildC2.__new__` overrides parent class `ParentC` in an inconsistent manner; compatibility is checked because this member is decorated with `@override`\n  `ChildC2.__new__` has type `[Self@ChildC2: ChildC2](cls: type[Self@ChildC2], x: str) -> ChildC2`, which is not assignable to `(cls: type[ChildC2], x: int) -> ParentC`, the type of `ParentC.__new__`\n  Signature mismatch:\n  expected: def __new__(cls: type[ChildC2], x: int) -> ParentC: ...\n                                               ^^^ parameter\n  found:    def __new__(cls: type[Self@ChildC2], x: str) -> ChildC2: ...\n                                                    ^^^ parameter",
       "line": 138,
-      "name": "bad-override",
+      "name": "bad-override-explicit",
       "severity": "error",
       "stop_column": 16,
       "stop_line": 138
@@ -5893,8 +5926,8 @@
     {
       "code": -2,
       "column": 20,
-      "concise_description": "`str` is not assignable to upper bound `int` of type variable `T_int`",
-      "description": "`str` is not assignable to upper bound `int` of type variable `T_int`",
+      "concise_description": "While checking parameter `y`: `str` is not assignable to upper bound `int` of type variable `T_int`",
+      "description": "While checking parameter `y`: `str` is not assignable to upper bound `int` of type variable `T_int`",
       "line": 241,
       "name": "bad-specialization",
       "severity": "error",
@@ -8467,8 +8500,8 @@
     {
       "code": -2,
       "column": 7,
-      "concise_description": "`int` is not assignable to upper bound `Sized` of type variable `ST`",
-      "description": "`int` is not assignable to upper bound `Sized` of type variable `ST`",
+      "concise_description": "While checking parameter `y`: `int` is not assignable to upper bound `Sized` of type variable `ST`",
+      "description": "While checking parameter `y`: `int` is not assignable to upper bound `Sized` of type variable `ST`",
       "line": 52,
       "name": "bad-specialization",
       "severity": "error",
@@ -9060,8 +9093,8 @@
     {
       "code": -2,
       "column": 21,
-      "concise_description": "`str` is not assignable to upper bound `LiteralString` of type variable `TLiteral`",
-      "description": "`str` is not assignable to upper bound `LiteralString` of type variable `TLiteral`",
+      "concise_description": "While checking parameter `s`: `str` is not assignable to upper bound `LiteralString` of type variable `TLiteral`",
+      "description": "While checking parameter `s`: `str` is not assignable to upper bound `LiteralString` of type variable `TLiteral`",
       "line": 119,
       "name": "bad-specialization",
       "severity": "error",
@@ -9082,8 +9115,8 @@
     {
       "code": -2,
       "column": 50,
-      "concise_description": "`str` is not assignable to upper bound `LiteralString` of type variable `T`",
-      "description": "`str` is not assignable to upper bound `LiteralString` of type variable `T`",
+      "concise_description": "While checking parameter `value`: `str` is not assignable to upper bound `LiteralString` of type variable `T`",
+      "description": "While checking parameter `value`: `str` is not assignable to upper bound `LiteralString` of type variable `T`",
       "line": 133,
       "name": "bad-specialization",
       "severity": "error",

@@ -36,6 +36,7 @@ use itertools::Either;
 use itertools::Itertools;
 use pyrefly_build::handle::Handle;
 use pyrefly_build::handle::SitePackagePath;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_key::ExactModuleKey;
 use pyrefly_python::module_key::ModuleKey;
@@ -132,6 +133,8 @@ use crate::module::typeshed::custom_typeshed_stdlib_config;
 use crate::solver::solver::VarRecurser;
 use crate::state::epoch::Epoch;
 use crate::state::errors::Errors;
+use crate::state::errors::LoadErrors;
+use crate::state::import_cycles::ImportCycles;
 use crate::state::load::FileContents;
 use crate::state::load::Load;
 use crate::state::loader::FindingOrError;
@@ -388,6 +391,8 @@ pub enum ModuleDep {
     ReexportSource(Name),
     /// `LookupExport::is_implicit_reexport`.
     IsImplicitReexport(Name),
+    /// `LookupExport::private_export`.
+    PrivateExport(Name),
     /// `LookupExport::get_deprecated`.
     GetDeprecated(Name),
     /// `LookupExport::export_origin`.
@@ -550,6 +555,7 @@ impl ModuleDeps {
             | ModuleDep::IsSpecialExport(name)
             | ModuleDep::ReexportSource(name)
             | ModuleDep::IsImplicitReexport(name)
+            | ModuleDep::PrivateExport(name)
             | ModuleDep::GetDeprecated(name)
             | ModuleDep::ExportOrigin(name)
             | ModuleDep::DocstringRange(name)
@@ -656,6 +662,7 @@ impl ModuleDep {
             ModuleDep::IsSpecialExport(_) => "is_special_export",
             ModuleDep::ReexportSource(_) => "reexport_source",
             ModuleDep::IsImplicitReexport(_) => "is_implicit_reexport",
+            ModuleDep::PrivateExport(_) => "private_export",
             ModuleDep::GetDeprecated(_) => "get_deprecated",
             ModuleDep::ExportOrigin(_) => "export_origin",
             ModuleDep::DocstringRange(_) => "docstring_range",
@@ -810,6 +817,8 @@ struct StateData {
     /// contents of a file on disk. Edits to open files and first loads of
     /// modules do not increase it.
     generation: u64,
+    /// The import-cycle analysis of the last committed transaction.
+    import_cycles: ImportCycles,
 }
 
 impl StateData {
@@ -821,6 +830,7 @@ impl StateData {
             memory: Default::default(),
             now: Epoch::zero(),
             generation: 0,
+            import_cycles: ImportCycles::default(),
         }
     }
 }
@@ -930,6 +940,8 @@ pub(crate) struct TransactionData<'a> {
     /// For `--report-scip` only: evict each module's answers once the solutions hook has seen
     /// it, whatever its require level. See `set_evict_answers_after_scip_hook`.
     evict_answers_after_scip_hook: bool,
+    /// The import-cycle analysis as of the last completed run.
+    import_cycles: ImportCycles,
 }
 
 impl<'a> TransactionData<'a> {
@@ -1214,25 +1226,47 @@ impl<'a> Transaction<'a> {
         self.with_module_inner(handle, |x| x.get_load())
     }
 
+    /// The load of `handle`, loading the module if this transaction has not. A module that this
+    /// creates is required only for its exports, so loading it queues no further steps. Unlike
+    /// `get_module_ex`, this does not report such a module to the subscriber, since it is not
+    /// checked.
+    pub(crate) fn get_or_load(&self, handle: &Handle) -> Arc<Load> {
+        if let Some(load) = self.get_load(handle) {
+            return load;
+        }
+        let (module_data, _) = self.data.updated_modules.ensure(handle, || {
+            ArcId::new(match self.readable.modules.get(handle) {
+                Some(module_data) => module_data.clone_for_mutation(),
+                None => ModuleDataMut::new(
+                    handle.dupe(),
+                    Require::Exports,
+                    self.data.state.get_config(handle),
+                    self.data.now,
+                ),
+            })
+        });
+        self.demand(module_data, Step::Load);
+        module_data
+            .state
+            .get_load()
+            .expect("a module has a load once its load step is computed")
+    }
+
     pub fn get_errors<'b>(&self, handles: impl IntoIterator<Item = &'b Handle>) -> Errors {
         Errors::new(
             handles
                 .into_iter()
                 .filter_map(|handle| {
                     self.with_module_config_inner(handle, |config, x| {
-                        let load = x.get_load()?;
-                        let parse_errors = x.parse_errors();
-                        let binding_errors = x.binding_errors();
-                        let solve_diagnostics = x.solve_errors();
-                        let module_ranges = x.module_ranges();
-                        Some((
-                            load,
-                            parse_errors,
-                            binding_errors,
-                            solve_diagnostics,
-                            module_ranges,
-                            config.dupe(),
-                        ))
+                        Some(LoadErrors {
+                            load: x.get_load()?,
+                            parse_errors: x.parse_errors(),
+                            binding_errors: x.binding_errors(),
+                            solve_errors: x.solve_errors(),
+                            import_cycle_errors: self.data.import_cycles.errors(handle),
+                            module_ranges: x.module_ranges(),
+                            config: config.dupe(),
+                        })
                     })
                 })
                 .collect(),
@@ -1889,6 +1923,8 @@ impl<'a> Transaction<'a> {
                     .spec_compliant_overloads(module_data.handle.path()),
                 legacy_overload_expansion: config
                     .legacy_overload_expansion(module_data.handle.path()),
+                legacy_generator_send_type: config
+                    .legacy_generator_send_type(module_data.handle.path()),
                 treat_all_caps_as_final: config.treat_all_caps_as_final(module_data.handle.path()),
                 infer_param_types_from_docstring: config
                     .infer_param_types_from_docstring(module_data.handle.path()),
@@ -2209,10 +2245,14 @@ impl<'a> Transaction<'a> {
             return None;
         };
         let class = class.dupe();
+        // A re-exported class, such as `_typeshed.NoneType`, has its `KeyTParams` in the module
+        // that defines it.
+        let class_module_data =
+            self.get_module(&handle.for_module(class.module_name(), class.module_path().dupe()));
         // A class without type parameters has no `KeyTParams`.
         let tparams = self
             .lookup_answer(
-                module_data,
+                class_module_data,
                 &KeyTParams(class.index()),
                 thread_state,
                 &answer_scope,
@@ -2524,7 +2564,7 @@ impl<'a> Transaction<'a> {
     /// chain using a BFS worklist algorithm. Every module that transitively depends on
     /// any of the changed modules is marked dirty.
     ///
-    /// This is called from `run_internal` when a mutable dependency cycle is detected
+    /// This is called from `run_epochs` when a mutable dependency cycle is detected
     /// (i.e., the same module changes twice in one run), or when the run reaches its epoch
     /// limit, as a fallback to ensure all cyclic modules reach a stable state.
     fn invalidate_rdeps(&mut self, mut follow: Vec<ArcId<ModuleDataMut>>) {
@@ -2558,6 +2598,25 @@ impl<'a> Transaction<'a> {
     }
 
     fn run_internal(
+        &mut self,
+        handles: &[Handle],
+        require: Require,
+        custom_thread_pool: Option<&ThreadPool>,
+    ) -> Result<(), Cancelled> {
+        self.run_epochs(handles, require, custom_thread_pool)?;
+        // Import cycles depend only on import statements, which the epochs do not track as
+        // dependencies: an edit can add or remove a cycle without changing any export. So the
+        // analysis is repeated over the whole transaction after every completed run. A cancelled
+        // analysis keeps the previous one, like any other result of a cancelled run.
+        let import_cycles = self
+            .data
+            .import_cycles
+            .update(self, custom_thread_pool.unwrap_or(&self.data.state.threads))?;
+        self.data.import_cycles = import_cycles;
+        Ok(())
+    }
+
+    fn run_epochs(
         &mut self,
         handles: &[Handle],
         require: Require,
@@ -3029,6 +3088,7 @@ impl<'a> Transaction<'a> {
                 strict_partial_subtyping: config.strict_partial_subtyping(m.handle.path()),
                 spec_compliant_overloads: config.spec_compliant_overloads(m.handle.path()),
                 legacy_overload_expansion: config.legacy_overload_expansion(m.handle.path()),
+                legacy_generator_send_type: config.legacy_generator_send_type(m.handle.path()),
                 treat_all_caps_as_final: config.treat_all_caps_as_final(m.handle.path()),
                 infer_param_types_from_docstring: config
                     .infer_param_types_from_docstring(m.handle.path()),
@@ -3513,15 +3573,9 @@ impl<'a> TransactionHandle<'a> {
     /// This helper centralizes that logic and returns a `TargetAnswers`
     /// enum so callers only need to handle the "answers available" case.
     fn lookup_target_answers(&self, calc_id: &CalcId) -> TargetAnswers<'a> {
-        // Look up the target module. Use default ModuleDep since cross-module
-        // operations don't establish new dependencies.
-        let module_data = match self
-            .get_module(LookupModule::Exact(calc_id.0.key()), ModuleDep::Exists)
-            .finding()
-        {
-            Some(data) => data,
-            None => return TargetAnswers::ModuleNotFound,
-        };
+        // SCC operations must use the member's original Python environment.
+        // They do not establish new dependencies.
+        let module_data = self.transaction.get_imported_module(&calc_id.0);
 
         if let Some(answers) = module_data.state.get_answers() {
             TargetAnswers::Available {
@@ -3726,6 +3780,17 @@ impl<'a> LookupExport for TransactionHandle<'a> {
         .unwrap_or(false)
     }
 
+    fn private_export(&self, module: ModuleName, name: &Name) -> Option<ExportLocation> {
+        if !(Ast::is_protected_attr(name) || Ast::is_mangled_attr(name)) {
+            return None;
+        }
+        self.with_exports(
+            module,
+            |exports, lookup| exports.private_export(name, lookup),
+            ModuleDep::PrivateExport(name.clone()),
+        )?
+    }
+
     fn is_special_export(&self, mut module: ModuleName, name: &Name) -> Option<SpecialExport> {
         let mut seen = HashSet::new();
         let mut name = name.clone();
@@ -3841,6 +3906,10 @@ impl<'a> LookupExport for TransactionHandle<'a> {
 }
 
 impl<'a> LookupAnswer for TransactionHandle<'a> {
+    fn handle(&self) -> &Handle {
+        &self.module_data.handle
+    }
+
     fn get<'answer, K: Solve<Self> + Exported>(
         &self,
         module: LookupModule,
@@ -4240,6 +4309,7 @@ impl State {
     ) -> Transaction<'a> {
         let now = readable.now;
         let stdlib = readable.stdlib.clone();
+        let import_cycles = readable.import_cycles.clone();
         Transaction {
             readable,
             stats: Mutex::new(TelemetryTransactionStats {
@@ -4268,6 +4338,7 @@ impl State {
                 cinderx_reporter: None,
                 solutions_hook: None,
                 evict_answers_after_scip_hook: false,
+                import_cycles,
             },
         }
     }
@@ -4374,6 +4445,7 @@ impl State {
                             cinderx_reporter: _,
                             solutions_hook: _,
                             evict_answers_after_scip_hook: _,
+                            import_cycles,
                         },
                 },
             committing_transaction_guard,
@@ -4432,6 +4504,7 @@ impl State {
             base, state.now
         );
         let displaced_stdlib = mem::replace(&mut state.stdlib, stdlib);
+        let displaced_import_cycles = mem::replace(&mut state.import_cycles, import_cycles);
         state.now = now;
         if inputs_changed.into_inner() {
             state.generation += 1;
@@ -4475,6 +4548,7 @@ impl State {
         // committed state, so readers do not wait on it. In the downgrade path,
         // the returned transaction still holds a read lock until this finishes.
         drop(displaced_stdlib);
+        drop(displaced_import_cycles);
         drop(displaced_modules);
         drop(displaced_loaders);
         drop(stale_loaders);

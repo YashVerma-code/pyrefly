@@ -275,6 +275,15 @@ impl Tool {
     }
 }
 
+impl std::fmt::Display for Tool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = self
+            .to_possible_value()
+            .expect("every Tool variant is a clap value");
+        f.write_str(value.get_name())
+    }
+}
+
 /// A simple lexer that deals with the rules around whitespace.
 /// As it consumes the string, it will move forward.
 struct Lexer<'a>(&'a str);
@@ -515,6 +524,41 @@ impl Suppression {
     }
 }
 
+/// Malformed syntax in an ignore comment.
+#[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
+pub enum MalformedReason {
+    /// The directive keyword is not `ignore` (nor `ignore-errors`), e.g.
+    /// `ignoree`, `ignored`, `ignore1`.
+    UnknownDirective,
+    /// A `[` opened an error-code list that was never closed, e.g. `ignore[no-such-code`.
+    UnterminatedBracket,
+    /// The error-code list is empty, e.g. `ignore[]` or `ignore[   ]`.
+    EmptyBracket,
+}
+
+/// Syntax metadata independent of a comment's lenient suppression effects.
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct MalformedIgnore {
+    tool: Tool,
+    range: TextRange,
+    reason: MalformedReason,
+}
+
+impl MalformedIgnore {
+    pub fn tool(&self) -> Tool {
+        self.tool
+    }
+
+    pub fn reason(&self) -> MalformedReason {
+        self.reason
+    }
+
+    /// The exact comment fragment, including its leading `#`.
+    pub fn range(&self) -> TextRange {
+        self.range
+    }
+}
+
 /// Record the position of lines affected by ignore suppressions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ignore {
@@ -522,15 +566,20 @@ pub struct Ignore {
     /// not the line of the suppression comment.
     ignores: SmallMap<LineNumber, Vec<Suppression>>,
     comments: SmallMap<LineNumber, Comment>,
+    /// Comments that look like ignore directives but failed to parse. Used to
+    /// emit `invalid-ignore-comment` diagnostics; does not affect suppression.
+    malformed: Vec<MalformedIgnore>,
 }
 
 impl Ignore {
     pub fn new(code: &str) -> Self {
         let lines = physical_line_ranges(code);
         let comments = comments_from_source(code, &lines);
+        let (ignores, malformed) = Self::parse(code, &lines, &comments);
         Self {
-            ignores: Self::parse(code, &lines, &comments),
+            ignores,
             comments,
+            malformed,
         }
     }
 
@@ -538,16 +587,21 @@ impl Ignore {
     pub fn from_tokens(code: &str, tokens: &Tokens) -> Self {
         let lines = physical_line_ranges(code);
         let comments = comments_from_tokens(tokens, &lines);
-        let ignores = Self::parse(code, &lines, &comments);
-        Self { ignores, comments }
+        let (ignores, malformed) = Self::parse(code, &lines, &comments);
+        Self {
+            ignores,
+            comments,
+            malformed,
+        }
     }
 
     fn parse(
         code: &str,
         lines: &[PhysicalLineRange],
         comments: &SmallMap<LineNumber, Comment>,
-    ) -> SmallMap<LineNumber, Vec<Suppression>> {
+    ) -> (SmallMap<LineNumber, Vec<Suppression>>, Vec<MalformedIgnore>) {
         let mut ignores: SmallMap<LineNumber, Vec<Suppression>> = SmallMap::new();
+        let mut malformed: Vec<MalformedIgnore> = Vec::new();
         // If we see a comment on a non-code line, apply it to the next non-comment line.
         let mut pending = Vec::new();
         let mut line = LineNumber::default();
@@ -572,12 +626,27 @@ impl Ignore {
             while let Some(suppression_start) = comment_starts.next() {
                 let suppression_end = comment_starts.peek().copied().unwrap_or(comment.len());
                 let body = &comment[suppression_start + 1..suppression_end];
-                if let Some(suppression) = Self::parse_ignore_comment(
+                let (supp, malformed_info) = Self::parse_ignore_comment(
                     body,
                     line,
                     comment_start + suppression_start,
                     comment_start + suppression_end,
-                ) {
+                );
+                if let Some((tool, reason)) = malformed_info {
+                    malformed.push(MalformedIgnore {
+                        tool,
+                        range: TextRange::new(
+                            TextSize::try_from(
+                                source_line.start + comment_start + suppression_start,
+                            )
+                            .expect("comment offset fits in u32"),
+                            TextSize::try_from(source_line.start + comment_start + suppression_end)
+                                .expect("comment offset fits in u32"),
+                        ),
+                        reason,
+                    });
+                }
+                if let Some(suppression) = supp {
                     if is_comment_only_line {
                         pending.push(suppression);
                     } else {
@@ -592,52 +661,80 @@ impl Ignore {
                 .or_default()
                 .append(&mut pending);
         }
-        ignores
+        debug_assert!(
+            malformed
+                .windows(2)
+                .all(|pair| pair[0].range.end() <= pair[1].range.start()),
+            "malformed fragments must have ordered, non-overlapping source ranges"
+        );
+        (ignores, malformed)
     }
 
-    /// Given the content of a comment, parse it as a suppression.
-    /// `comment_line`, `comment_offset`, and `comment_end_offset` locate the comment.
+    /// Parse lenient suppression effects independently of malformed syntax.
     fn parse_ignore_comment(
         l: &str,
         comment_line: LineNumber,
         comment_offset: usize,
         comment_end_offset: usize,
-    ) -> Option<Suppression> {
+    ) -> (Option<Suppression>, Option<(Tool, MalformedReason)>) {
         let mut lex = Lexer(l);
         lex.trim_start();
-
-        let mut tool = None;
-        if let Some(t) = lex.starts_with_tool() {
+        let tool = if let Some(tool) = lex.starts_with_tool() {
             lex.trim_start();
-            if lex.starts_with("ignore") {
-                tool = Some(t);
+            if !lex.starts_with("ignore") {
+                return (None, None);
             }
+            tool
         } else if lex.starts_with("pyre-ignore") || lex.starts_with("pyre-fixme") {
-            tool = Some(Tool::Pyre);
-        }
-        let tool = tool?;
+            Tool::Pyre
+        } else {
+            return (None, None);
+        };
 
-        // We have seen `type: ignore` or `pyre-ignore`. Now look for `[code]` or the end.
         let gap = lex.trim_start();
-        if lex.starts_with("[") {
+        let (kind, reason) = if lex.starts_with("[") {
             let rest = lex.rest();
-            let inside = rest.split_once(']').map_or(rest, |x| x.0);
-            return Some(Suppression {
-                tool,
-                kind: parse_error_codes(inside),
-                comment_line,
-                comment_offset,
-                comment_end_offset,
-            });
+            let (inside, closed) = rest
+                .split_once(']')
+                .map_or((rest, false), |(inside, _)| (inside, true));
+            let kind = parse_error_codes(inside);
+            let reason = if !closed {
+                Some(MalformedReason::UnterminatedBracket)
+            } else if kind.iter().all(String::is_empty) {
+                Some(MalformedReason::EmptyBracket)
+            } else {
+                None
+            };
+            // An empty Type tag still applies the configured unknown-tag policy.
+            (Some(kind), reason)
         } else if gap || lex.word_boundary() {
-            return Some(Suppression::blanket(
+            (Some(Vec::new()), None)
+        } else if tool == Tool::Type
+            || (tool != Tool::Pyrefly && (lex.0.starts_with('-') || lex.0.starts_with('_')))
+            || ((lex.starts_with("-errors") || lex.starts_with("-all-errors"))
+                && lex.word_boundary())
+        {
+            // `# type: <identifier>` may be a type comment, not a misspelled directive.
+            // File-level and other-tool directives are handled separately.
+            return (None, None);
+        } else {
+            (None, Some(MalformedReason::UnknownDirective))
+        };
+        (
+            kind.map(|kind| Suppression {
                 tool,
+                kind,
                 comment_line,
                 comment_offset,
                 comment_end_offset,
-            ));
-        }
-        None
+            }),
+            reason.map(|reason| (tool, reason)),
+        )
+    }
+
+    /// Malformed comment fragments in source order, independent of suppression effects.
+    pub fn malformed(&self) -> &[MalformedIgnore] {
+        &self.malformed
     }
 
     pub fn is_ignored(
@@ -963,9 +1060,17 @@ pub fn misplaced_ignore_errors(
 
 #[cfg(test)]
 mod tests {
+    use enum_iterator::all;
     use pyrefly_util::prelude::SliceExt;
 
     use super::*;
+
+    #[test]
+    fn test_tool_name_round_trip() {
+        for tool in all::<Tool>() {
+            assert_eq!(Tool::from_comment(&tool.to_string()), Some(tool));
+        }
+    }
 
     #[test]
     fn test_parse_ignores() {
@@ -1098,69 +1203,239 @@ x = """
 
     #[test]
     fn test_parse_ignore_comment() {
-        fn f(x: &str, tool: Option<Tool>, kind: &[&str]) {
-            let dummy_line = LineNumber::default();
+        let line = LineNumber::default();
+        let suppression = |x: &str, tool, kind: &[&str]| Suppression {
+            tool,
+            kind: kind.iter().map(|x| (*x).to_owned()).collect(),
+            comment_line: line,
+            comment_offset: 0,
+            comment_end_offset: x.len() + 1,
+        };
+        let valid = |x: &str, tool, kind: &[&str]| {
             assert_eq!(
-                Ignore::parse_ignore_comment(x, dummy_line, 0, x.len() + 1),
-                tool.map(|tool| Suppression {
-                    tool,
-                    kind: kind.map(|x| (*x).to_owned()),
-                    comment_line: dummy_line,
-                    comment_offset: 0,
-                    comment_end_offset: x.len() + 1,
-                }),
+                Ignore::parse_ignore_comment(x, line, 0, x.len() + 1),
+                (Some(suppression(x, tool, kind)), None),
                 "{x:?}"
             );
-        }
+        };
+        let not_directive = |x: &str| {
+            assert_eq!(
+                Ignore::parse_ignore_comment(x, line, 0, x.len() + 1),
+                (None, None),
+                "{x:?}"
+            );
+        };
+        let malformed = |x: &str, tool, reason, supp_kind: Option<&[&str]>| {
+            assert_eq!(
+                Ignore::parse_ignore_comment(x, line, 0, x.len() + 1),
+                (
+                    supp_kind.map(|kind| suppression(x, tool, kind)),
+                    Some((tool, reason))
+                ),
+                "{x:?}"
+            );
+        };
 
-        f("ignore: pyrefly", None, &[]);
-        f("pyrefly: ignore", Some(Tool::Pyrefly), &[]);
-        f(
+        not_directive("ignore: pyrefly");
+        valid("pyrefly: ignore", Tool::Pyrefly, &[]);
+        valid(
             "pyrefly: ignore[bad-return]",
-            Some(Tool::Pyrefly),
+            Tool::Pyrefly,
             &["bad-return"],
         );
-        f("pyrefly: ignore[]", Some(Tool::Pyrefly), &[""]);
-        f("pyrefly: ignore[bad-]", Some(Tool::Pyrefly), &["bad-"]);
+        valid("pyrefly: ignore[bad-]", Tool::Pyrefly, &["bad-"]);
 
         // Check spacing
-        f(" type: ignore ", Some(Tool::Type), &[]);
-        f("type:ignore", Some(Tool::Type), &[]);
-        f("type :ignore", None, &[]);
+        valid(" type: ignore ", Tool::Type, &[]);
+        valid("type:ignore", Tool::Type, &[]);
+        not_directive("type :ignore");
 
         // Check extras
         // Mypy rejects that, Pyright accepts it
-        f("type: ignore because it is wrong", Some(Tool::Type), &[]);
-        f("type: ignore_none", None, &[]);
-        f("type: ignore1", None, &[]);
-        f("type: ignore?", Some(Tool::Type), &[]);
+        valid("type: ignore because it is wrong", Tool::Type, &[]);
+        valid("type: ignore?", Tool::Type, &[]);
 
-        f("pyright: ignore", Some(Tool::Pyright), &[]);
-        f(
-            "pyright: ignore[something]",
-            Some(Tool::Pyright),
-            &["something"],
-        );
+        valid("pyright: ignore", Tool::Pyright, &[]);
+        valid("pyright: ignore[something]", Tool::Pyright, &["something"]);
 
-        f("pyre-ignore", Some(Tool::Pyre), &[]);
-        f("pyre-ignore[7]", Some(Tool::Pyre), &["7"]);
-        f("pyre-fixme[7]", Some(Tool::Pyre), &["7"]);
-        f(
+        valid("pyre-ignore", Tool::Pyre, &[]);
+        valid("pyre-ignore[7]", Tool::Pyre, &["7"]);
+        valid("pyre-fixme[7]", Tool::Pyre, &["7"]);
+        valid(
             "pyre-fixme[61]: `x` may not be initialized here.",
-            Some(Tool::Pyre),
+            Tool::Pyre,
             &["61"],
         );
-        f("pyre-fixme: core type error", Some(Tool::Pyre), &[]);
+        valid("pyre-fixme: core type error", Tool::Pyre, &[]);
 
-        f("zuban: ignore", Some(Tool::Zuban), &[]);
-        f(
-            "zuban: ignore[something]",
-            Some(Tool::Zuban),
-            &["something"],
+        valid("zuban: ignore", Tool::Zuban, &[]);
+        valid("zuban: ignore[something]", Tool::Zuban, &["something"]);
+
+        // (a) keyword typo: a directive that reaches the `ignore` stem but
+        // continues with an identifier char. Suppresses nothing, as today.
+        malformed(
+            "pyrefly: ignoree",
+            Tool::Pyrefly,
+            MalformedReason::UnknownDirective,
+            None,
+        );
+        malformed(
+            "pyrefly: ignoree[asdfasdf]",
+            Tool::Pyrefly,
+            MalformedReason::UnknownDirective,
+            None,
+        );
+        malformed(
+            "pyrefly: ignored",
+            Tool::Pyrefly,
+            MalformedReason::UnknownDirective,
+            None,
+        );
+        not_directive("type: ignore1");
+        not_directive("type: ignore_none");
+        malformed(
+            "pyrefly: ignore_none",
+            Tool::Pyrefly,
+            MalformedReason::UnknownDirective,
+            None,
         );
 
-        // For a malformed comment, at least do something with it (works well incrementally)
-        f("type: ignore[hello", Some(Tool::Type), &["hello"]);
+        // (b) unterminated bracket: keep the lenient parse so suppression is
+        // unchanged, but flag the comment.
+        malformed(
+            "type: ignore[hello",
+            Tool::Type,
+            MalformedReason::UnterminatedBracket,
+            Some(&["hello"]),
+        );
+        malformed(
+            "type: ignore[hello, world",
+            Tool::Type,
+            MalformedReason::UnterminatedBracket,
+            Some(&["hello", "world"]),
+        );
+
+        // Empty brackets retain their raw suppression entries and a separate lint.
+        malformed(
+            "pyrefly: ignore[]",
+            Tool::Pyrefly,
+            MalformedReason::EmptyBracket,
+            Some(&[""]),
+        );
+        malformed(
+            "pyrefly: ignore[   ]",
+            Tool::Pyrefly,
+            MalformedReason::EmptyBracket,
+            Some(&[""]),
+        );
+        malformed(
+            "pyrefly: ignore[,]",
+            Tool::Pyrefly,
+            MalformedReason::EmptyBracket,
+            Some(&["", ""]),
+        );
+        malformed(
+            "pyrefly: ignore[ , ]",
+            Tool::Pyrefly,
+            MalformedReason::EmptyBracket,
+            Some(&["", ""]),
+        );
+        malformed(
+            "type: ignore[]",
+            Tool::Type,
+            MalformedReason::EmptyBracket,
+            Some(&[""]),
+        );
+
+        // A typo'd file-level directive (`ignore-errorss`) is still a typo.
+        malformed(
+            "pyrefly: ignore-errorss",
+            Tool::Pyrefly,
+            MalformedReason::UnknownDirective,
+            None,
+        );
+
+        // Non-Pyrefly tools with hyphens or underscores are not typos.
+        not_directive("mypy: ignore-missing-imports");
+
+        // Real directives and non-directives are never flagged.
+        not_directive("type: list[int]");
+        not_directive("pyrefly: see ticket");
+        not_directive("pyrefly: ignore-errors");
+        not_directive("pyre-ignore-all-errors");
+    }
+
+    #[test]
+    fn test_empty_entries_suppression_effects() {
+        let line = LineNumber::default();
+        for comment in [
+            "type: ignore[]",
+            "type: ignore[,]",
+            "type: ignore[",
+            "pyre-ignore[]",
+        ] {
+            let ignore = Ignore::new(&format!("x = 1  # {comment}"));
+            for policy in [
+                TypeIgnoreUnknownTagBehavior::Suppress,
+                TypeIgnoreUnknownTagBehavior::DowngradeToWarning,
+                TypeIgnoreUnknownTagBehavior::NoEffect,
+            ] {
+                assert_eq!(
+                    ignore.suppression_effect(line, "bad-assignment", &Tool::all(), policy),
+                    if comment.starts_with("pyre") {
+                        SuppressionEffect::Suppress
+                    } else {
+                        match policy {
+                            TypeIgnoreUnknownTagBehavior::Suppress => SuppressionEffect::Suppress,
+                            TypeIgnoreUnknownTagBehavior::DowngradeToWarning => {
+                                SuppressionEffect::DowngradeToWarning
+                            }
+                            TypeIgnoreUnknownTagBehavior::NoEffect => SuppressionEffect::None,
+                        }
+                    },
+                    "{comment}: {policy:?}"
+                );
+            }
+        }
+        let ignore = Ignore::new("x = 1  # type: ignore[pyrefly:bad-return,]");
+        assert_eq!(
+            ignore.get(&line).unwrap()[0].error_codes(),
+            &["pyrefly:bad-return", ""]
+        );
+        assert_eq!(
+            ignore.suppression_effect(
+                line,
+                "bad-assignment",
+                &Tool::all(),
+                TypeIgnoreUnknownTagBehavior::DowngradeToWarning
+            ),
+            SuppressionEffect::DowngradeToWarning
+        );
+    }
+
+    #[test]
+    fn test_malformed_ignores_are_additive() {
+        // A typo is recorded as malformed but suppresses nothing.
+        let ig = Ignore::new("x = bad  # pyrefly: ignoree");
+        assert_eq!(ig.malformed().len(), 1);
+        assert_eq!(
+            ig.malformed()[0].reason(),
+            MalformedReason::UnknownDirective
+        );
+        assert!(ig.is_empty());
+
+        // An unterminated bracket is flagged yet still suppresses, exactly as before.
+        let ig = Ignore::new("x = bad  # pyrefly: ignore[no-such-code");
+        assert_eq!(ig.malformed().len(), 1);
+        assert_eq!(
+            ig.malformed()[0].reason(),
+            MalformedReason::UnterminatedBracket
+        );
+        assert!(!ig.is_empty());
+
+        // A non-directive comment is never flagged.
+        let ig = Ignore::new("y = list[int]  # type: list[int]");
+        assert!(ig.malformed().is_empty());
     }
 
     #[test]

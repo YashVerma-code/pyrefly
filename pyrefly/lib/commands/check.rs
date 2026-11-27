@@ -448,7 +448,7 @@ struct OutputArgs {
     #[arg(long, group = "baseline_action")]
     update_baseline: bool,
 
-    /// Rewrite the baseline file to drop stale entries without recording new errors.
+    /// Drop stale baseline entries only when no new errors meet `--min-severity`.
     /// Existing entries for files outside the current check are retained.
     #[arg(long, group = "baseline_action")]
     prune_baseline: bool,
@@ -1488,8 +1488,8 @@ fn write_unconfigured_upsell<W: Write>(
                 MigratedFromKind::Pyright(MigratedConfigSource::PyprojectToml) => {
                     ("`[tool.pyright]` in your `pyproject.toml`", Preset::Default)
                 }
-                MigratedFromKind::BasedPyright(MigratedConfigSource::DedicatedFile, _) => {
-                    unreachable!("no such thing as basedpyrightconfig.json")
+                MigratedFromKind::BasedPyright(MigratedConfigSource::DedicatedFile, preset) => {
+                    ("your BasedPyright `pyrightconfig.json`", preset)
                 }
                 MigratedFromKind::BasedPyright(MigratedConfigSource::PyprojectToml, preset) => {
                     ("`[tool.basedpyright]` in your `pyproject.toml`", preset)
@@ -1949,15 +1949,17 @@ impl CheckArgs {
 
         let state = Forgetter::new(State::new(config_finder, thread_count), true);
         let require_levels = self.get_required_levels();
-        // The dependency graph report reads the dependencies between modules, which a
-        // one-shot transaction does not record.
-        let transaction = if self.output.dependency_graph.is_some() {
-            state.as_ref().new_transaction(require_levels.default, None)
-        } else {
-            state
-                .as_ref()
-                .new_one_shot_transaction(require_levels.default)
-        };
+        // A one-shot transaction does not record the dependencies between modules. The dependency
+        // graph report reads them, and the SCIP report needs them because it re-solves some
+        // dependencies at a higher `Require` level after the check, which can change their exports.
+        let transaction =
+            if self.output.dependency_graph.is_some() || self.output.report_scip.is_some() {
+                state.as_ref().new_transaction(require_levels.default, None)
+            } else {
+                state
+                    .as_ref()
+                    .new_one_shot_transaction(require_levels.default)
+            };
         let mut transaction = Forgetter::new(transaction, true);
         let (loaded_handles, _, sourcedb_errors) = handles.all(state.as_ref().config_finder());
 
@@ -2289,6 +2291,14 @@ impl CheckArgs {
 
         let (baseline_status, unused_baseline_entries, retained_baseline_entries) =
             baseline_apply_result.resolve(self.output.update_baseline)?;
+        // New errors can hide existing diagnostics, so their absence does not prove a row
+        // stale. Display filters must not make an incomplete check safe to prune.
+        let baseline_prune_blocked = self.output.prune_baseline
+            && (config_errors_count > 0
+                || ordinary
+                    .iter()
+                    .chain(&collected.directives)
+                    .any(|e| e.severity() >= defaults.min_severity));
         let only_filter = defaults
             .only
             .as_ref()
@@ -2358,8 +2368,9 @@ impl CheckArgs {
         // We update the baseline file if requested, after reporting any new
         // errors using the old baseline. Directives are structurally excluded
         // — they live in `directives`, not `ordinary_errors`.
-        // `--prune-baseline` rewrites the file only when there is something to drop.
-        let rewriting_baseline = self.output.prune_baseline && unused_baseline_entries > 0;
+        // `--prune-baseline` rewrites only when the check is safe and there is something to drop.
+        let rewriting_baseline =
+            self.output.prune_baseline && !baseline_prune_blocked && unused_baseline_entries > 0;
         if self.output.update_baseline {
             let baseline_path = defaults
                 .baseline
@@ -2391,6 +2402,8 @@ impl CheckArgs {
                 "Removed {} from the baseline file",
                 count(unused_baseline_entries, "unused suppression")
             );
+        } else if baseline_prune_blocked {
+            info!("Skipped baseline pruning because new errors remain");
         } else if self.output.prune_baseline {
             // `--prune-baseline` was requested but there was nothing to drop, so no
             // file was rewritten. Confirm the no-op so scripted/CI runs are not left
@@ -3221,6 +3234,52 @@ def go(w: Widget) -> int:
             "unexpected project root: {}",
             metadata.project_root
         );
+    }
+
+    /// Regression test for https://github.com/pyrefly-org/pyrefly/issues/5785.
+    #[test]
+    fn check_writes_scip_report_documenting_dependency() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        let site_packages = root.join("sp");
+        fs::create_dir_all(&site_packages).unwrap();
+        // With unannotated bodies skipped, `y` is inferred as `Any` at `Require::Exports`, but
+        // as `int` once the SCIP report re-solves `dependency` to document `C`.
+        fs::write(
+            site_packages.join("dependency.py"),
+            "class C:\n    def __init__(self):\n        self.y = 1\n",
+        )
+        .unwrap();
+        let module = root.join("main.py");
+        fs::write(&module, "from dependency import C\n\ndel C().y\n").unwrap();
+        let scip_path = temp.path().join("index.scip");
+        let mut config = test_config(&root);
+        config.root.check_unannotated_defs = Some(false);
+        config.python_environment.site_package_path = Some(vec![site_packages]);
+        config.configure();
+
+        let args = CheckArgs::parse_from([
+            "check",
+            "--report-scip",
+            scip_path.to_str().unwrap(),
+            "--relative-to",
+            root.to_str().unwrap(),
+        ]);
+        let (status, _) = args
+            .run_once(
+                "test",
+                Box::new(TestIncludes {
+                    root: root.clone(),
+                    initial_files: vec![module],
+                }),
+                ConfigFinder::new_constant(ArcId::new(config)),
+                UpsellDecision::Skip,
+                ThreadCount::Inline,
+            )
+            .unwrap();
+        assert!(matches!(status, CommandExitStatus::Success));
+        let index = scip::types::Index::parse_from_bytes(&fs::read(&scip_path).unwrap()).unwrap();
+        assert_eq!(index.documents.len(), 1);
     }
 
     #[test]

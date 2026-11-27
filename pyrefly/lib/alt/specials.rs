@@ -618,7 +618,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 |arg| self.heap.mk_typeform(arg),
             ),
             SpecialForm::Annotated if arguments.len() > 1 => {
-                let mut inner = self.expr_untype(&arguments[0], type_argument_context, errors);
+                let (mut inner, mut inner_metadata) =
+                    self.expr_untype_annotated_arg(&arguments[0], type_argument_context, errors);
                 let metadata: Vec<Type> = arguments[1..]
                     .iter()
                     .map(|e| self.expr_infer(e, &self.error_swallower()))
@@ -626,6 +627,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(frame) = self.polars_frame_annotated_type(&inner, &metadata) {
                     inner = frame;
                 }
+                // The innermost metadata comes first when Annotated types are nested.
+                let metadata = if inner_metadata.is_empty() {
+                    metadata
+                } else {
+                    inner_metadata.extend(metadata);
+                    inner_metadata
+                };
                 Type::Annotated(Box::new(inner), metadata.into_boxed_slice())
             }
             SpecialForm::Annotated => self.error(

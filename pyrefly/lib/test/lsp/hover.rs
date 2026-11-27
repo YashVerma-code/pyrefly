@@ -5,8 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::env;
 use std::path::PathBuf;
 use std::slice;
+use std::sync::Arc;
 
 use lsp_types::Contents;
 use lsp_types::Hover;
@@ -25,6 +27,7 @@ use ruff_text_size::TextSize;
 use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::get_hover;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
+use crate::state::load::FileContents;
 use crate::state::lsp::FindPreference;
 use crate::state::require::Require;
 use crate::state::state::State;
@@ -41,6 +44,37 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
         }) => markup.value,
         _ => "None".to_owned(),
     }
+}
+
+#[test]
+fn hover_callback_arguments_in_generic_constructor() {
+    let code = r#"
+from typing import Callable
+
+class C:
+    def __init__(self, cb: Callable[[int], None]) -> None: ...
+
+class Worker:
+    def callback(self, value: int) -> None: ...
+
+def callback(self: int) -> None: ...
+
+def make[T: C](cls: type[T], worker: Worker) -> None:
+    cls(callback)
+#         ^
+    cls(worker.callback)
+#                 ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("def callback(self: int) -> None: ..."),
+        "{report}"
+    );
+    let compact_report = report.split_whitespace().collect::<String>();
+    assert!(
+        compact_report.contains("defcallback(self:Worker,value:int)->None:..."),
+        "{report}"
+    );
 }
 
 #[test]
@@ -484,9 +518,9 @@ from typing import overload
 
 class C[T]:
     @overload
-    def f(self: C[int], x: int) -> int: ...
+    def f(self: "C[int]", x: int) -> int: ...
     @overload
-    def f(self: C[str], x: str) -> str: ...
+    def f(self: "C[str]", x: str) -> str: ...
     def f(self, x: int | str) -> int | str:
         return x
 
@@ -1791,10 +1825,10 @@ from typing import overload
 
 class Matrix:
     @overload
-    def __matmul__(self, other: Matrix) -> Matrix: ...
+    def __matmul__(self, other: "Matrix") -> "Matrix": ...
     @overload
-    def __matmul__(self, other: int) -> Matrix: ...
-    def __matmul__(self, other) -> Matrix: ...
+    def __matmul__(self, other: int) -> "Matrix": ...
+    def __matmul__(self, other) -> "Matrix": ...
 
 lhs = Matrix()
 rhs = Matrix()
@@ -1823,7 +1857,7 @@ lhs @ rhs
 fn hover_over_augmented_assignment_operator_shows_in_place_dunder_name() {
     let code = r#"
 class Counter:
-    def __iadd__(self, other: int) -> Counter:
+    def __iadd__(self, other: int) -> "Counter":
         return self
 
 c = Counter()
@@ -4527,6 +4561,128 @@ result = [x for x in x if x in [1]]
         report.contains("__contains__"),
         "Second 'in' should show __contains__ hover, got: {report}"
     );
+}
+
+#[test]
+fn hover_imported_constructor_after_default_edit() {
+    for retention in [Require::Exports, Require::Everything] {
+        for exported_alias in [false, true] {
+            let mut library = r#"
+from dataclasses import dataclass, field
+
+@dataclass
+class C:
+    x: int = field(default=1)
+"#
+            .to_owned();
+            let caller = if exported_alias {
+                library.push_str("init = C.__init__\n");
+                "from lib import init\ninit\n"
+            } else {
+                "from lib import C\ninit = C.__init__\ninit\n"
+            };
+            let mut env = TestEnv::new().with_default_require_level(retention);
+            env.add_with_path("lib", "lib.py", &library);
+            env.add_with_path("main", "main.py", caller);
+            let (state, handle) = env.to_state();
+            let main = handle("main");
+            let position = TextSize::try_from(caller.rfind("init").unwrap()).unwrap();
+            let before = get_test_report(&state, &main, position);
+            assert!(
+                before
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains("x:int=1"),
+                "{before}"
+            );
+
+            let mut transaction = state.new_committable_transaction(retention, None);
+            transaction.as_mut().set_memory(vec![(
+                PathBuf::from("lib.py"),
+                Some(Arc::new(FileContents::from_source(
+                    library.replace("default=1", "default=2"),
+                ))),
+            )]);
+            transaction
+                .as_mut()
+                .run(slice::from_ref(&main), Require::Everything, None);
+            state.commit_transaction(transaction, None);
+            let after = get_test_report(&state, &main, position);
+            assert!(
+                after
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains("x:int=2"),
+                "retention={retention:?}; exported_alias={exported_alias}; {after}"
+            );
+        }
+    }
+}
+
+#[test]
+fn hover_shows_dataclass_field_defaults() {
+    let code = r#"
+from dataclasses import dataclass, field
+from typing import Literal
+
+def make_default() -> Literal[7]:
+    return 7
+
+@dataclass
+class Base:
+    name: str = field(default="example")
+
+@dataclass
+class Model(Base):
+    optional: str | None = field(default=None)
+    count: int = field(default=42, kw_only=True)
+    enabled: bool = field(default=False)
+    ratio: float = field(default=-1.5)
+    mode: int = field(default=0o777)
+    generated: int = field(default_factory=make_default)
+
+Model
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    let compact = report.split_whitespace().collect::<String>();
+    for expected in [
+        "name:str='example'",
+        "optional:str|None=None",
+        "count:int=42",
+        "enabled:bool=False",
+        "ratio:float=-1.5",
+        "mode:int=0o777",
+        "generated:int=...",
+    ] {
+        assert!(
+            compact.contains(expected),
+            "Expected {expected}, got: {report}"
+        );
+    }
+}
+
+// Regression test for https://github.com/pyrefly-org/pyrefly/issues/4802.
+#[test]
+fn hover_shows_mapped_column_defaults() {
+    let code = r#"
+from sqlalchemy.orm import DeclarativeBase, Mapped, MappedAsDataclass, mapped_column
+from sqlalchemy.sql.sqltypes import String
+
+class Model(MappedAsDataclass, DeclarativeBase):
+    icon: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+
+Model
+#^
+"#;
+    let sqlalchemy_path =
+        env::var("SQLALCHEMY_TEST_PATH").expect("SQLALCHEMY_TEST_PATH must be set");
+    let mut env = TestEnv::new_with_site_package_paths(&[&sqlalchemy_path]);
+    env.add("main", code);
+    let (state, handle) = env.to_state();
+    let position = extract_cursors_for_test(code)[0];
+    let report = get_test_report(&state, &handle("main"), position);
+    assert!(report.contains("icon: str | None = None"), "{report}");
 }
 
 #[test]

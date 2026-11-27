@@ -9,6 +9,7 @@
 mod partial;
 mod partial_edge;
 mod partial_generics;
+mod partialmethod;
 mod singledispatch;
 mod singledispatch_register;
 mod util;

@@ -1,0 +1,18 @@
+# < definition test scip-python python snapshot-util 0.1 check_shapes/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The pytest configuration names this module, so all of it is test code.
+from test_shapes import area
+#    ^^^^^^^^^^^ reference test  snapshot-util 0.1 test_shapes/__init__:
+#                       ^^^^ reference test  snapshot-util 0.1 test_shapes/area().
+
+
+def check_area() -> None:
+#   ^^^^^^^^^^ definition test  snapshot-util 0.1 check_shapes/check_area().
+    assert area(2, 3) == 6
+#          ^^^^ reference test  snapshot-util 0.1 test_shapes/area().
+

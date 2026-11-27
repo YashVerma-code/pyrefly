@@ -814,6 +814,7 @@ impl<'a> BindingsBuilder<'a> {
         } else {
             Binding::NameAssign(Box::new(NameAssign {
                 name: name.id.clone(),
+                name_range: name.range,
                 annotation: ann,
                 expr: value,
                 legacy_tparams: tparams,

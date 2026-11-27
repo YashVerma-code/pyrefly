@@ -922,6 +922,7 @@ impl MatchedParam {
 #[derive(Debug, Clone)]
 pub struct ArgMap {
     pub arg_to_param: HashMap<ArgumentKey, MatchedParam>,
+    ambiguous_arguments: SmallSet<ArgumentKey>,
     /// Required parameters that were left unmatched
     pub unmatched_params: SmallSet<Option<Name>>,
     /// Positional slots skipped before the first exposed source argument.
@@ -933,6 +934,7 @@ impl ArgMap {
     pub fn new() -> Self {
         Self {
             arg_to_param: HashMap::new(),
+            ambiguous_arguments: SmallSet::new(),
             unmatched_params: SmallSet::new(),
             positional_offset: 0,
         }
@@ -956,6 +958,13 @@ impl ArgMap {
         self
     }
 
+    pub(crate) fn parameter_name(&self, argument: ArgumentKey) -> Option<&Name> {
+        if self.ambiguous_arguments.contains(&argument) {
+            return None;
+        }
+        self.arg_to_param.get(&argument)?.name.as_ref()
+    }
+
     fn insert(
         &mut self,
         argument: ArgumentKey,
@@ -963,6 +972,14 @@ impl ArgMap {
         name: Option<Name>,
         arg_ty: Option<Type>,
     ) -> Option<MatchedParam> {
+        // A splat can match multiple parameters under the same argument key.
+        if self
+            .arg_to_param
+            .get(&argument)
+            .is_some_and(|param| param.name != name)
+        {
+            self.ambiguous_arguments.insert(argument);
+        }
         self.arg_to_param
             .insert(argument, MatchedParam::new(ty, name, arg_ty))
     }
@@ -1064,7 +1081,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 );
             }
             Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => {
-                self.error_unknown_from_error(arg_errors, range, "The type of this argument")
+                self.error_unknown_from_error(arg_errors, range, range, "The type of this argument")
             }
             Type::Any(AnyStyle::Explicit) => {
                 self.error_explicit_any_use(arg_errors, range, "The type of this argument")
@@ -1509,7 +1526,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let specialization_errors =
                     self.finish_quantified(self_qs, self.solver().config.infer_with_first_use);
                 if let Err(errors) = specialization_errors {
-                    self.add_specialization_errors(errors, arg.range(), call_errors, context);
+                    self.add_specialization_errors(
+                        errors,
+                        Some(&argmap),
+                        arg.range(),
+                        call_errors,
+                        context,
+                    );
                 }
             }
         }
@@ -1766,20 +1789,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     kwparams.insert(name, (ty, NameOrigin::Param, required));
                 }
                 Param::Kwargs(name, ty) if let Some(typed_dict) = ty.unpacked_typed_dict() => {
+                    // Synthesized partial signatures may override a bound TypedDict key with
+                    // an optional named parameter while preserving the original Unpack tail.
                     self.typed_dict_fields(typed_dict).into_iter().for_each(
                         |(field_name, field)| {
-                            kwparams.insert(
-                                name_owner.push(field_name),
-                                (
-                                    type_owner.push(field.ty),
-                                    NameOrigin::UnpackedKwargs(name.as_ref()),
-                                    if field.required {
-                                        &Required::Required
-                                    } else {
-                                        &Required::Optional(None)
-                                    },
-                                ),
-                            );
+                            kwparams.entry(name_owner.push(field_name)).or_insert((
+                                type_owner.push(field.ty),
+                                NameOrigin::UnpackedKwargs(name.as_ref()),
+                                if field.required {
+                                    &Required::Required
+                                } else {
+                                    &Required::Optional(None)
+                                },
+                            ));
                         },
                     );
                     kwargs = match self.typed_dict_extra_items(typed_dict) {
@@ -2247,15 +2269,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         }
         for (name, ty, default) in default_check {
+            let Some(default_ty) = &default.ty else {
+                continue;
+            };
             // `ty` may contain type variables, so we record quantified bounds from the default and
             // check for inconsistent solutions. We mark any literals in the default as implicit so
             // that ordinary type variables get solved to promoted types (`int` rather than
             // `Literal[N]`). A shape-extension restriction's single binding source preserves the
             // literal instead.
             let default_ty = if call_context.is_shape_extension_var_type(ty) {
-                default.ty.clone()
+                default_ty.clone()
             } else {
-                default.ty.clone().with_literal_style(LitStyle::Implicit)
+                default_ty.clone().with_literal_style(LitStyle::Implicit)
             };
             self.check_type_with_options(
                 &default_ty,

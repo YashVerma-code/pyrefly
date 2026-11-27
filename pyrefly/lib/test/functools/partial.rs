@@ -22,6 +22,111 @@ use crate::functools_testcase;
 use crate::test::util::TestEnv;
 use crate::testcase;
 
+testcase!(
+    test_partial_overload_bound_typed_dict_keys,
+    TestEnv::new().enable_strict_partial_subtyping(),
+    r#"
+from functools import partial
+from typing import Callable, Literal, TypedDict, Unpack, overload
+class OpenConn(TypedDict):
+    connection: str
+class ClosedConn(TypedDict, closed=True):
+    connection: str
+class ExtraConn(TypedDict, extra_items=int):
+    connection: str
+@overload
+def cache(cursor: int, *, kind: Literal["open"], **kwargs: Unpack[OpenConn]) -> None: ...
+@overload
+def cache(cursor: int, *, kind: Literal["closed"], **kwargs: Unpack[ClosedConn]) -> None: ...
+@overload
+def cache(cursor: int, *, kind: Literal["extra"], **kwargs: Unpack[ExtraConn]) -> None: ...
+def cache(cursor: int, *, kind: str, **kwargs: object) -> None: ...
+open_partial = partial(cache, kind="open", connection="c")
+closed_partial = partial(cache, kind="closed", connection="c")
+extra_partial = partial(cache, kind="extra", connection="c")
+open_partial(0)
+open_partial(0, arbitrary=1)  # E: Unexpected keyword argument `arbitrary`
+open_partial(0, connection="override")
+closed_partial(0)
+closed_partial(0, bogus=1)  # E: Unexpected keyword argument `bogus`
+extra_partial(0, count=1)
+extra_partial(0, count="wrong")  # E: Keyword argument `count` with type `Literal['wrong']`
+open_callback: Callable[[int], None] = open_partial
+closed_callback: Callable[[int], None] = closed_partial
+extra_callback: Callable[[int], None] = extra_partial
+
+def plain_cache(cursor: int, **kwargs: Unpack[OpenConn]) -> None: ...
+plain_partial = partial(plain_cache, connection="c")
+plain_partial(0)
+plain_partial(0, arbitrary=1)  # E: Unexpected keyword argument `arbitrary`
+"#,
+);
+
+testcase!(
+    test_partial_typed_dict_keyword_contract,
+    TestEnv::new().enable_strict_partial_subtyping(),
+    r#"
+from functools import partial
+from typing import Literal, Protocol, TypedDict, Unpack, overload
+class Open(TypedDict):
+    x: int
+    label: str
+class Callback(Protocol):
+    def __call__(self, **kwargs: Unpack[Open]) -> str: ...
+def plain(tag: int, **kwargs: Unpack[Open]) -> str:
+    return kwargs["label"]
+@overload
+def target(tag: Literal[0], **kwargs: Unpack[Open]) -> str: ...
+@overload
+def target(tag: Literal[1], **kwargs: Unpack[Open]) -> str: ...
+def target(tag: int, **kwargs: object) -> str: ...
+plain_bound = partial(plain, 0, x=1, label="bound")
+overloaded_bound = partial(target, 0, x=1, label="bound")
+plain_callback: Callback = plain_bound
+overloaded_callback: Callback = overloaded_bound
+plain_bound(label="ok")
+overloaded_bound(label="ok")
+plain_bound(x=2, label="ok")
+overloaded_bound(x=2, label="ok")
+plain_bound(label=1)  # E: is not assignable to parameter `label` with type `str`
+overloaded_bound(label=1)  # E: is not assignable to parameter `label` with type `str`
+plain_bound(label="ok", typo=1)  # E: Unexpected keyword argument `typo`
+overloaded_bound(label="ok", typo=1)  # E: Unexpected keyword argument `typo`
+class Extra(Open):
+    arbitrary: object
+def forward(extra: Extra) -> None:
+    plain_bound(**extra)
+    overloaded_bound(**extra)
+"#,
+);
+
+testcase!(
+    test_partial_typed_dict_bound_fields,
+    TestEnv::new().enable_strict_partial_subtyping(),
+    r#"
+from functools import partial
+from typing import Callable, TypedDict, Unpack, assert_type
+class Closed[T](TypedDict, closed=True):
+    value: T
+
+def target[T](**kwargs: Unpack[Closed[T]]) -> T:
+    return kwargs["value"]
+bound = partial(target, value=1)
+assert_type(bound(), int)
+callback: Callable[[], int] = bound
+bound(value="wrong")  # E: is not assignable to parameter `value` with type `int`
+
+class TwoKeys(TypedDict, closed=True):
+    x: int
+    y: str
+
+def closed(**kwargs: Unpack[TwoKeys]) -> None: ...
+closed_bound = partial(closed, x=1, y="bound")
+empty_callback: Callable[[], None] = closed_bound
+closed_bound()
+"#,
+);
+
 // ===== Basic: bind nothing / positional / keyword =====
 
 functools_testcase!(
@@ -443,7 +548,8 @@ def fn1(a1: int) -> None: ...
 def fn2(**kwargs: Unpack[D1]) -> None: ...
 def main5(**d2: Unpack[D2]) -> None:
     partial(fn1, **d2)()  # E: Unexpected keyword argument `a2` in function `fn1`
-    partial(fn2, **d2)()  # E: Unexpected keyword argument `a2` in function `fn2`
+    # TypedDict subtypes can carry extra keys when forwarded to unpacked kwargs.
+    partial(fn2, **d2)()
 "#,
 );
 

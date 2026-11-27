@@ -90,6 +90,7 @@ pub struct Stdlib {
     async_generator: StdlibResult<(Class, Arc<TParams>)>,
     awaitable: StdlibResult<(Class, Arc<TParams>)>,
     coroutine: StdlibResult<(Class, Arc<TParams>)>,
+    hashable: StdlibResult<ClassType>,
     type_var: StdlibResult<ClassType>,
     /// Defined in `typing_extensions` util 3.13, defined in `typing` since 3.10.
     /// After 3.13, `typing_extensions` reexports from `typing`.
@@ -272,6 +273,7 @@ impl Stdlib {
             async_generator: lookup_generic(typing, "AsyncGenerator", 2),
             awaitable: lookup_generic(typing, "Awaitable", 1),
             coroutine: lookup_generic(typing, "Coroutine", 3),
+            hashable: lookup_concrete(typing, "Hashable"),
             type_var: lookup_concrete(typing, "TypeVar"),
             param_spec: lookup_concrete(standardised(3, 10), "ParamSpec"),
             param_spec_args: lookup_concrete(standardised(3, 10), "ParamSpecArgs"),
@@ -561,6 +563,10 @@ impl Stdlib {
         Self::apply(&self.generator, vec![yield_ty, send_ty, return_ty])
     }
 
+    pub fn generator_object(&self) -> &Class {
+        &Self::unwrap(&self.generator).0
+    }
+
     pub fn async_generator(&self, yield_ty: Type, send_ty: Type) -> ClassType {
         Self::apply(&self.async_generator, vec![yield_ty, send_ty])
     }
@@ -579,6 +585,10 @@ impl Stdlib {
 
     pub fn coroutine_object(&self) -> &Class {
         &Self::unwrap(&self.coroutine).0
+    }
+
+    pub fn hashable(&self) -> &ClassType {
+        Self::primitive(&self.hashable)
     }
 
     pub fn type_var(&self) -> &ClassType {

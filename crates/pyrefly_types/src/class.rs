@@ -39,7 +39,7 @@ use crate::function::Deprecation;
 use crate::known_class::KnownClass;
 use crate::type_ord::TypeOrd;
 use crate::type_ord::TypeOrdCtx;
-use crate::types::DjangoKind;
+use crate::types::SpecializationKind;
 use crate::types::Substitution;
 use crate::types::TArgs;
 use crate::types::TParams;
@@ -601,10 +601,10 @@ pub enum DjangoSpecialization<'a> {
 }
 
 impl ClassType {
-    /// Create a class type without a Django specialization, dropping any that `targs` carries.
+    /// Create a class type without an instance specialization, dropping any that `targs` carries.
     /// The `targs` must match the `tparams`, if this fails we will panic.
     pub fn new(class: Class, targs: TArgs) -> Self {
-        Self(class, targs.without_django())
+        Self(class, targs.without_specialization())
     }
 
     pub fn class_object(&self) -> &Class {
@@ -647,7 +647,7 @@ impl ClassType {
         Self(
             self.0,
             self.1
-                .with_django(DjangoKind::Queryset, [queryset.to_type()]),
+                .with_specialization(SpecializationKind::Queryset, [queryset.to_type()]),
         )
     }
 
@@ -660,7 +660,8 @@ impl ClassType {
         );
         Self(
             self.0,
-            self.1.with_django(DjangoKind::TargetPkType, [pk_type]),
+            self.1
+                .with_specialization(SpecializationKind::TargetPkType, [pk_type]),
         )
     }
 
@@ -674,7 +675,7 @@ impl ClassType {
         Self(
             self.0,
             self.1
-                .with_django(DjangoKind::EffectiveBase, [base.to_type()]),
+                .with_specialization(SpecializationKind::EffectiveBase, [base.to_type()]),
         )
     }
 
@@ -683,9 +684,28 @@ impl ClassType {
     pub fn with_django_field(self, get_type: Type, set_type: Type, override_type: Type) -> Self {
         Self(
             self.0,
-            self.1
-                .with_django(DjangoKind::Field, [get_type, set_type, override_type]),
+            self.1.with_specialization(
+                SpecializationKind::Field,
+                [get_type, set_type, override_type],
+            ),
         )
+    }
+
+    /// Attach the unbound callable signature of a `partialmethod` descriptor.
+    pub fn with_partialmethod_signature(self, signature: Type) -> Self {
+        assert!(
+            self.is(KnownClass::FunctoolsPartialMethod),
+            "only partialmethod carries an unbound descriptor signature"
+        );
+        Self(
+            self.0,
+            self.1
+                .with_specialization(SpecializationKind::PartialMethod, [signature]),
+        )
+    }
+
+    pub fn partialmethod_signature(&self) -> Option<&Type> {
+        self.1.partialmethod_signature()
     }
 
     pub fn django_specialization(&self) -> Option<DjangoSpecialization<'_>> {

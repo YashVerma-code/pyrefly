@@ -1,0 +1,21 @@
+# < definition scip-python python snapshot-util 0.1 shapes/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Library code, which is not test code.
+
+
+def area(width: int, height: int) -> int:
+#   ^^^^ definition  snapshot-util 0.1 shapes/area().
+#        ^^^^^ definition  snapshot-util 0.1 shapes/area().(width)
+#               ^^^ reference  python-stdlib 3.13 builtins/int#
+#                    ^^^^^^ definition  snapshot-util 0.1 shapes/area().(height)
+#                            ^^^ reference  python-stdlib 3.13 builtins/int#
+#                                    ^^^ reference  python-stdlib 3.13 builtins/int#
+    return width * height
+#          ^^^^^ reference  snapshot-util 0.1 shapes/area().(width)
+#                  ^^^^^^ reference  snapshot-util 0.1 shapes/area().(height)
+

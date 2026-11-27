@@ -28,15 +28,14 @@ export default function LandingPage(): React.ReactElement {
             description={siteConfig.description}
         >
             <Banner
-                text="📝 Help shape Pyrefly by taking our user survey!"
+                text="🎉 Pyrefly v1.5 is now available!"
                 dismissible={true}
                 cta={{
-                    text: 'Take the survey',
-                    href: 'https://forms.gle/dx6GrzHX83sMjT6L9',
-                    external: true,
+                    text: 'Read the blog',
+                    href: '/blog/v1.5',
                     onClick: () =>
                         log(LoggingEvent.CLICK, {
-                            button_id: 'banner_user_survey',
+                            button_id: 'banner_v1.5_blog',
                         }),
                 }}
             />

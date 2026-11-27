@@ -99,7 +99,7 @@ testcase!(
     test_bivariant,
     r#"
 class A[T]:
-    def f(self, x: B[T]) -> B[T]:
+    def f(self, x: "B[T]") -> "B[T]":
         return x
 
 class B[U]:
@@ -339,12 +339,12 @@ testcase!(
     r#"
 from typing import Sequence
 
-class A[T](B[Sequence[T]]):
-    ...
-
 class B[T]:
     def f(self, x:T) -> T:
         return x
+
+class A[T](B[Sequence[T]]):
+    ...
 
 b = B[int]()
 
@@ -357,8 +357,8 @@ testcase!(
     test_self_referential_covariance,
     r#"
 class FooInferred[Node]:
-    def __init__(self, *options: FooInferred[Node]) -> None: ...
-    def __or__[OtherNode](self, other: FooInferred[OtherNode]) -> FooInferred[Node | OtherNode]:
+    def __init__(self, *options: "FooInferred[Node]") -> None: ...
+    def __or__[OtherNode](self, other: "FooInferred[OtherNode]") -> "FooInferred[Node | OtherNode]":
         # Node should be inferred as covariant since it only appears in covariant positions
         # (the return type of __or__, and __init__ is skipped for variance inference)
         return FooInferred[Node | OtherNode](self, other)
@@ -378,7 +378,7 @@ testcase!(
     test_self_referential_no_hang,
     r#"
 class C[T]:
-    def f(self, a: C[T]) -> None:
+    def f(self, a: "C[T]") -> None:
         pass
 
 good: C[int] = C[int]()
@@ -397,7 +397,7 @@ T_co = TypeVar("T_co", covariant=True)
 class CovariantWrapper(Generic[T_co]): ...
 
 class RecursiveCarrier[T]:
-    def recurse(self) -> RecursiveCarrier[CovariantWrapper[T]]: ...
+    def recurse(self) -> "RecursiveCarrier[CovariantWrapper[T]]": ...
 
 # Both classes combine grounded contravariant evidence from `consume` with provisional
 # covariant evidence reached through `RecursiveCarrier`. They differ only in which evidence
@@ -438,7 +438,7 @@ class Container[T]:
     def __init__(self, value: T):
         self._value: T = value
 
-    def to_value_T(self: Container[T]) -> T:
+    def to_value_T(self: "Container[T]") -> T:
         return self._value
 
 check_covariant: Container[object] = Container[int](1)
@@ -448,7 +448,7 @@ direct_call: int = Container.to_value_T(Container[int](1))
 direct_call_bad: str = Container.to_value_T(Container[int](1))  # E:
 
 class ReceiverAndValue[T]:
-    def put(self: ReceiverAndValue[T], value: T) -> None: ...
+    def put(self: "ReceiverAndValue[T]", value: T) -> None: ...
 
 receiver_ok: ReceiverAndValue[int] = ReceiverAndValue[object]()
 receiver_bad: ReceiverAndValue[object] = ReceiverAndValue[int]()  # E:
@@ -467,23 +467,23 @@ callable_field_bad: CallableField[object] = CallableField[int]()  # E:
 
 class PropertyGetter[T]:
     @property
-    def value(self: PropertyGetter[T]) -> T: ...
+    def value(self: "PropertyGetter[T]") -> T: ...
 
 property_ok: PropertyGetter[object] = PropertyGetter[int]()
 property_bad: PropertyGetter[int] = PropertyGetter[object]()  # E:
 
 class PropertySetter[T]:
     @property
-    def value(self: PropertySetter[T]) -> T: ...
+    def value(self: "PropertySetter[T]") -> T: ...
     @value.setter
-    def value(self: PropertySetter[T], value: T) -> None: ...
+    def value(self: "PropertySetter[T]", value: T) -> None: ...
 
 property_setter_bad1: PropertySetter[object] = PropertySetter[int]()  # E:
 property_setter_bad2: PropertySetter[int] = PropertySetter[object]()  # E:
 
 class ClassGetter[T]:
     @classmethod
-    def get(cls: type[ClassGetter[T]]) -> T: ...
+    def get(cls: "type[ClassGetter[T]]") -> T: ...
 
 classmethod_ok: ClassGetter[object] = ClassGetter[int]()
 classmethod_bad: ClassGetter[int] = ClassGetter[object]()  # E:

@@ -2674,6 +2674,46 @@ def f_or():
 );
 
 testcase!(
+    test_walrus_in_later_bool_op_operand_narrows,
+    r#"
+import os
+from typing import assert_type
+
+def f(u: str | os.PathLike[str]) -> None:
+    if u and (u := str(u)):
+        assert_type(u, str)
+    assert_type(u, str | os.PathLike[str])
+
+def g(u: str | os.PathLike[str], flag: bool) -> None:
+    if flag and (u := str(u)):
+        assert_type(u, str)
+    else:
+        assert_type(u, str | os.PathLike[str])
+
+def h(u: str | os.PathLike[str]) -> None:
+    if not u or not (u := str(u)):
+        return
+    assert_type(u, str)
+
+def k(u: str | os.PathLike[str]) -> None:
+    while u and (u := str(u)):
+        assert_type(u, str)
+        break
+
+def m(u: str | os.PathLike[str]) -> str:
+    return u if u and (u := str(u)) else ""
+
+def n(u: str | os.PathLike[str]) -> None:
+    x = u and (u := str(u))
+    assert_type(u, str | os.PathLike[str])
+
+def p(u: str | os.PathLike[str]) -> None:
+    if u and (u := str(u)) and u.upper():
+        assert_type(u, str)
+    "#,
+);
+
+testcase!(
     test_setitem_with_loop_and_walrus,
     r#"
 def f():

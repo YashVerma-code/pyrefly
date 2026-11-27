@@ -384,7 +384,7 @@ fn nested_init_only_constructor_hints(depth: usize, value_type: &str, callbacks:
 from typing import Callable
 
 class Node[T]:
-    def __init__(self, {callback_parameter}value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+    def __init__(self, {callback_parameter}value: T, child: "Node[int] | Node[str] | None" = None) -> None: ...
 
 def f(value: {value_type}) -> None:
     root: Node[int] | Node[str] = {expression}
@@ -772,7 +772,7 @@ fn nested_getattr(c: &mut Criterion) {
                     c,
                     &format!("getattr_{attr}_{position}_{depth}"),
                     format!(
-                        "from typing import Any, assert_type\nclass C:\n    child: C\ndef test(c: C) -> None:\n    assert_type({expr}, {expected})\n",
+                        "from typing import Any, assert_type\nclass C:\n    child: \"C\"\ndef test(c: C) -> None:\n    assert_type({expr}, {expected})\n",
                     ),
                     0,
                 );

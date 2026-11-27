@@ -1130,7 +1130,7 @@ fn make_class_declaration(env: &dyn TypeEnv, cls: &Class) -> RegularDeclaration 
 }
 
 /// Convert a `ModulePath` to a URI string, handling bundled typeshed paths.
-fn path_to_uri(module_path: &pyrefly_python::module_path::ModulePath) -> String {
+pub(crate) fn path_to_uri(module_path: &ModulePath) -> String {
     if let Some(real_path) = to_real_path(module_path) {
         Uri::from_file_path(&real_path).map_or_else(
             |()| real_path.to_string_lossy().to_string(),

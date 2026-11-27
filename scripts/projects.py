@@ -1553,8 +1553,15 @@ def get_mypy_primer_projects() -> list[Project]:
             pyright_cmd="{pyright}",
             pyrefly_cmd="{pyrefly}",
             deps=[
+                # The CPU-only build of torch has the same Python code as the
+                # default CUDA build without its gigabytes of CUDA wheels. Its
+                # version carries a `+cpu` local label, so pip prefers it over the
+                # PyPI build. Only the CUDA build depends on Triton, so Triton is
+                # listed explicitly.
+                "--extra-index-url=https://download.pytorch.org/whl/cpu",
                 "torch",
-                "{repo}[dev,surrogate]",
+                "triton",
+                "{repo}[dev]",
             ],
         ),
         Project(

@@ -37,6 +37,7 @@ pub fn parse_mypy_config(ini_path: &Path) -> anyhow::Result<ConfigFile> {
         .with_context(|| format!("While trying to read mypy config at {}", ini_path.display()))?;
 
     let mut cfg = ConfigFile::default();
+    cfg.root.legacy_generator_send_type = Some(true);
 
     let config_options: Vec<Box<dyn ConfigOptionMigrater>> = vec![
         Box::new(ProjectIncludes),
@@ -110,6 +111,7 @@ ignore_missing_imports = True
         fs_anyhow::write(&input_path, mypy)?;
 
         let cfg = parse_mypy_config(&input_path)?;
+        assert_eq!(cfg.root.legacy_generator_send_type, Some(true));
         let project_includes = Globs::new(vec![
             "src".to_owned(),
             "other_src".to_owned(),
@@ -163,6 +165,7 @@ unknown_option = True
         fs_anyhow::write(&input_path, mypy)?;
 
         let cfg = parse_mypy_config(&input_path)?;
+        assert_eq!(cfg.root.legacy_generator_send_type, Some(true));
         let default = ConfigFile::default();
         assert_eq!(cfg.project_includes, default.project_includes);
         assert_eq!(cfg.project_excludes, default.project_excludes);

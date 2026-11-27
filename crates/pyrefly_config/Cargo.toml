@@ -2,7 +2,7 @@
 
 [package]
 name = "pyrefly_config"
-version = "1.5.0"
+version = "1.6.0-dev.1"
 authors = ["Meta"]
 edition = "2024"
 repository = "https://github.com/pyrefly-org/pyrefly"
@@ -41,7 +41,7 @@ pulldown-cmark = "0.13.6"
 tempfile = "3.27.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-uv-pep440 = { version = "0.0.100", features = ["version-ranges"] }
+uv-pep440 = { version = "0.0.101", features = ["version-ranges"] }
 which = "8.0.6"
 
 [lints]

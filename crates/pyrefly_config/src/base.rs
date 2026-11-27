@@ -224,6 +224,8 @@ impl Preset {
             Preset::Default => ConfigBase::default(),
             Preset::Strict => {
                 let errors = HashMap::from([
+                    (ErrorKind::BadDescriptorInheritance, Severity::Error),
+                    (ErrorKind::BadOverrideDescriptor, Severity::Error),
                     (ErrorKind::DirectAbstractBaseInstantiation, Severity::Error),
                     (ErrorKind::ImplicitAny, Severity::Error),
                     (ErrorKind::InstanceVarAssign, Severity::Error),
@@ -360,6 +362,10 @@ pub struct ConfigBase {
     ///   are only eligible when `check-unannotated-defs` is true.
     pub infer_return_types: Option<InferReturnTypes>,
 
+    /// Keep inferred generator send types gradual for mypy and Pyright compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_generator_send_type: Option<bool>,
+
     /// How class decorators affect the class type. Defaults to `ignore` under the `basic` and
     /// `legacy` presets, and to `typed-only` otherwise.
     pub class_decorator_behavior: Option<ClassDecoratorBehavior>,
@@ -460,6 +466,7 @@ impl ConfigBase {
             replace_untyped_imports_with_any: Some(Vec::new()),
             check_unannotated_defs: Some(true),
             infer_return_types: Some(InferReturnTypes::Checked),
+            legacy_generator_send_type: Some(false),
             class_decorator_behavior: Some(ClassDecoratorBehavior::TypedOnly),
             disable_type_errors_in_ide: Some(false),
             ignore_errors_in_generated_code: Some(false),
@@ -491,6 +498,7 @@ impl ConfigBase {
             untyped_def_behavior,
             check_unannotated_defs,
             infer_return_types,
+            legacy_generator_send_type,
             class_decorator_behavior,
             disable_type_errors_in_ide,
             ignore_errors_in_generated_code,
@@ -526,6 +534,7 @@ impl ConfigBase {
             untyped_def_behavior,
             check_unannotated_defs,
             infer_return_types,
+            legacy_generator_send_type,
             class_decorator_behavior,
             disable_type_errors_in_ide,
             ignore_errors_in_generated_code,
@@ -641,6 +650,45 @@ mod tests {
     use pulldown_cmark::TagEnd;
 
     use super::*;
+
+    #[test]
+    fn test_descriptor_inheritance_configuration() {
+        let kind = ErrorKind::BadDescriptorInheritance;
+        for (preset, expected) in [
+            (Preset::Off, Severity::Ignore),
+            (Preset::Basic, Severity::Ignore),
+            (Preset::Legacy, Severity::Warn),
+            (Preset::Default, Severity::Warn),
+            (Preset::Strict, Severity::Error),
+            (Preset::All, Severity::Error),
+        ] {
+            let defaults = preset.apply().errors.unwrap_or_default();
+            assert_eq!(defaults.severity(kind), expected, "{preset}");
+            for parent_severity in [Severity::Ignore, Severity::Error] {
+                let mut errors = defaults.clone();
+                errors.merge_user_overrides(&ErrorDisplayConfig::new(HashMap::from([(
+                    ErrorKind::BadOverride,
+                    parent_severity,
+                )])));
+                assert_eq!(
+                    errors.severity(kind),
+                    expected,
+                    "{preset}: independent kind"
+                );
+                for severity in [Severity::Ignore, Severity::Warn, Severity::Error] {
+                    let mut explicitly_set = errors.clone();
+                    explicitly_set.merge_user_overrides(&ErrorDisplayConfig::new(HashMap::from([
+                        (kind, severity),
+                    ])));
+                    assert_eq!(explicitly_set.severity(kind), severity, "{preset}");
+                    assert_eq!(
+                        explicitly_set.severity(ErrorKind::BadOverride),
+                        parent_severity
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_redundant_type_check_configuration() {

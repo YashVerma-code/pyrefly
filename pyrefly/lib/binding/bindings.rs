@@ -36,14 +36,13 @@ use pyrefly_util::gas::Gas;
 use pyrefly_util::suggest::Candidate;
 use pyrefly_util::suggest::Search;
 use pyrefly_util::visit::Visit;
-use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
-use ruff_python_ast::ExprBooleanLiteral;
 use ruff_python_ast::ExprName;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Parameter;
+use ruff_python_ast::PythonVersion;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::StmtFunctionDef;
@@ -657,25 +656,6 @@ fn ranges_contain(ranges: &[TextRange], range: TextRange) -> bool {
     idx > 0 && ranges[idx - 1].contains_range(range)
 }
 
-/// Bind a constant summary so adding or removing a mutator invalidates dependent unwrap answers.
-fn bind_functools_wrapper_mutation(
-    table: &mut BindingTable,
-    range: TextRange,
-    has_mutation: bool,
-) -> Idx<Key> {
-    table.insert(
-        Key::FunctoolsWrapperMutation(range),
-        Binding::Expr(
-            None,
-            Box::new(Expr::BooleanLiteral(ExprBooleanLiteral {
-                node_index: AtomicNodeIndex::default(),
-                range,
-                value: has_mutation,
-            })),
-        ),
-    )
-}
-
 impl Bindings {
     #[expect(dead_code)] // Useful API
     fn len(&self) -> usize {
@@ -1107,7 +1087,6 @@ impl Bindings {
         infer_param_types_from_docstring: bool,
         use_shape_comments_and_stubs: bool,
     ) -> Self {
-        let module_range = x.range;
         let dunder_all_entries = exports
             .dunder_all_names()
             .filter_map(|(_, name, content_range)| {
@@ -1226,8 +1205,23 @@ impl Bindings {
         let (scope_trace, unset_nodes) = builder.scopes.finish();
 
         let semantic_errors = builder.semantic_syntax_errors.into_inner();
+        // Ruff also reports `NonModuleImportStar` for a `lazy from x import *` outside module
+        // scope, which always gets `LazyImportNotAllowed` for the same statement. CPython reports
+        // only the `lazy` error.
+        let invalid_lazy_imports: SmallSet<TextRange> = semantic_errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    error.kind,
+                    SemanticSyntaxErrorKind::LazyImportNotAllowed { .. }
+                )
+            })
+            .map(|error| error.range)
+            .collect();
         for error in semantic_errors {
-            if Self::should_emit_semantic_syntax_error(&error) {
+            let duplicate = matches!(error.kind, SemanticSyntaxErrorKind::NonModuleImportStar(_))
+                && invalid_lazy_imports.contains(&error.range);
+            if !duplicate && Self::should_emit_semantic_syntax_error(&error) {
                 builder
                     .errors
                     .error_builder(error.range, ErrorKind::InvalidSyntax, error.to_string())
@@ -1282,10 +1276,9 @@ impl Bindings {
             }
         }
         let module_deletes = scope_trace.module_deletes().clone();
-        let functools_wrapper_mutation = bind_functools_wrapper_mutation(
-            &mut builder.table,
-            module_range,
-            builder.has_functools_wrapper_mutation,
+        let functools_wrapper_mutation = builder.table.insert(
+            Key::FunctoolsWrapperMutation(x.range),
+            Binding::FunctoolsWrapperMutation(builder.has_functools_wrapper_mutation),
         );
         builder.table.insert(
             KeyDjangoRelations,
@@ -1371,6 +1364,11 @@ impl Bindings {
             | SemanticSyntaxErrorKind::DuplicateMatchClassAttribute(_)
             | SemanticSyntaxErrorKind::DuplicateTypeParameter
             | SemanticSyntaxErrorKind::NonModuleImportStar(_) => true,
+            // Before Python 3.15, the parser already reports every `lazy` import as unsupported
+            // syntax.
+            SemanticSyntaxErrorKind::LazyImportNotAllowed { .. }
+            | SemanticSyntaxErrorKind::LazyImportStar
+            | SemanticSyntaxErrorKind::LazyFutureImport => error.python_version >= PythonVersion::PY315,
             // TODO: the following errors aren't being emitted even when enabled
             // we should investigate that
             SemanticSyntaxErrorKind::WriteToDebug(_)
@@ -1393,10 +1391,7 @@ impl Bindings {
             | SemanticSyntaxErrorKind::AnnotatedNonlocal(_)
             | SemanticSyntaxErrorKind::NonlocalWithoutBinding(_)
             // Newly added by the ruff upgrade; left disabled to preserve existing behavior.
-            // pyrefly does not model `lazy` imports, and the others need triage before enabling.
-            | SemanticSyntaxErrorKind::LazyImportNotAllowed { .. }
-            | SemanticSyntaxErrorKind::LazyImportStar
-            | SemanticSyntaxErrorKind::LazyFutureImport
+            // These need triage before enabling.
             | SemanticSyntaxErrorKind::NamedExpressionInComprehensionIterable
             | SemanticSyntaxErrorKind::NamedExpressionInClassBodyComprehension
             | SemanticSyntaxErrorKind::TypeParameterDefaultOrder(_)
@@ -3662,6 +3657,7 @@ impl<'a> BindingsBuilder<'a> {
                 match self.lookup_legacy_tparam_from_idx(
                     id,
                     original_idx,
+                    initialized.clone(),
                     has_scoped_type_params,
                     shadows_enclosing_annotation_scope,
                     class_scope_fallback,
@@ -3714,6 +3710,7 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         id: LegacyTParamId,
         original_idx: Idx<Key>,
+        initialized: InitializationStatus,
         has_scoped_type_params: bool,
         shadows_enclosing_annotation_scope: bool,
         class_scope_fallback: Option<Idx<Key>>,
@@ -3746,7 +3743,7 @@ impl<'a> BindingsBuilder<'a> {
             id,
             idx,
             tparam_idx,
-            initialized: InitializationStatus::Initialized,
+            initialized,
             class_scope_fallback,
         })
     }
@@ -3918,8 +3915,16 @@ impl<'a> SemanticSyntaxContext for BindingsBuilder<'a> {
     }
 
     fn lazy_import_context(&self) -> Option<LazyImportContext> {
-        // pyrefly does not model `lazy` imports, so there is never a lazy-import context.
-        None
+        // CPython checks for a `try` statement in the current scope first.
+        if self.scopes.in_try() {
+            Some(LazyImportContext::TryExceptBlocks)
+        } else if self.scopes.in_class_body() {
+            Some(LazyImportContext::Class)
+        } else if self.scopes.in_function_scope() {
+            Some(LazyImportContext::Function)
+        } else {
+            None
+        }
     }
 
     fn in_notebook(&self) -> bool {

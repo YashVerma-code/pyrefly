@@ -224,8 +224,7 @@ pub fn will_rename_files(
             &new_path,
             config.search_path().chain(
                 config
-                    .fallback_search_path
-                    .for_directory(new_path.parent())
+                    .fallback_search_path_for_directory(new_path.parent())
                     .iter(),
             ),
             &config.extra_file_extensions,

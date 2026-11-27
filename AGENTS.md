@@ -4,6 +4,9 @@
 
 Pyrefly is a fast language server and type checker for Python.
 
+The GitHub repository is `pyrefly-org/pyrefly`. Use this name in commands rather
+than the former `facebook/pyrefly` or `meta/pyrefly` names.
+
 Architecture:
 
 - Written in Rust using Buck (mostly for meta developers) and cargo (mostly for

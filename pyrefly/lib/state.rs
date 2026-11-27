@@ -10,6 +10,7 @@ pub mod dirty;
 pub mod epoch;
 pub mod errors;
 pub mod ide;
+pub mod import_cycles;
 pub mod import_tracker;
 pub mod load;
 pub mod loader;

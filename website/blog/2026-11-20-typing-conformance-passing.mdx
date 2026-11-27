@@ -1,0 +1,78 @@
+---
+title: "Reaching 100% Type System Conformance"
+description: Pyrefly v1.5 passes all of the Python typing conformance tests. Learn what that means and how we got there.
+slug: typing-conformance-passing
+authors: [rebeccachen]
+tags: [typechecking]
+hide_table_of_contents: false
+---
+
+# Reaching 100% type system conformance
+
+The specification of the Python type system comes with a [conformance suite](https://github.com/python/typing/tree/main/conformance) that tests how closely type checkers conform to the spec. With the release of Pyrefly 1.5.0, Pyrefly [passes all of the current conformance tests](https://htmlpreview.github.io/?https://github.com/python/typing/blob/9026db31db1152abeadd3638734e02bc02b8fd33/conformance/results/results.html). This means you can use Pyrefly with confidence when you need a fully featured, standards-compliant type checker.
+
+Read on for more details about what a 100% conformance score does - and doesn't - mean, as well as a peek at some of the technical details involved in writing a type checker to conform to a living specification.
+
+Note: As of this writing, Pyrefly and Zuban are the only checkers at 100%. The latest live results are [here](https://htmlpreview.github.io/?https://github.com/python/typing/blob/main/conformance/results/results.html).
+
+<!-- truncate -->
+
+## What conformance means
+
+First, a brief detour into the history of Python typing: originally, the Python type system was loosely specified in a series of Python Enhancement Proposals (PEPs). These PEPs added features piecemeal to the type system, largely driven by innovation in early type checkers such as mypy and pyright. The result was multiple fully functional, self-consistent type checkers that interpreted type annotations slightly differently and were incompatible with one another.
+
+To improve this situation, a shared typing specification and conformance test suite were introduced. The spec is a living document that continually evolves as the type system improves.
+
+So in this context, what does 100% conformance mean?
+* It means Pyrefly supports all standard type system features, so it should work well for most projects and use cases.
+* It means Pyrefly passes all of the conformance tests for the *current snapshot* of the typing specification. We're committed to keeping Pyrefly conformant, but it won't be constantly at a perfect 100%.
+* It does *not* mean Pyrefly is bug-free. We're always on the lookout for edge cases not covered by the spec or not exercised by the conformance tests. If you find a bug, [let us know](https://github.com/pyrefly-org/pyrefly/issues/new?template=issue_template.yml)!
+
+## Getting to 100%
+
+On August 9, after over a year of chasing down bugs and implementing missing features one conformance failure at a time, Pyrefly reached [99% conformance](https://github.com/pyrefly-org/pyrefly/blob/1fa6f385566b383115eeeaa49d79465028c8b1eb/conformance/third_party/results.json#L5). Four days later, we were back down to [97%](https://github.com/pyrefly-org/pyrefly/blob/cb5b3c77bac30ce49721343006658813d8648a6f/conformance/third_party/results.json#L5)! This happened because two conformance tests were added for a newly accepted feature that Pyrefly did not yet support. Here are a couple more examples of surprises we ran into on the way to 100%.
+
+### When the conformance tests get it wrong
+
+The `dataclasses_descriptors.py` conformance test used to contain an example similar to this:
+
+```python
+from dataclasses import dataclass
+from typing import Any, assert_type
+
+class Desc:
+    def __get__(self, instance: object, owner: Any) -> int: ...
+
+@dataclass
+class DC:
+    x: Desc = Desc()
+
+dc = DC(Desc())
+assert_type(dc.x, int)
+```
+
+The asserted type is incorrect. Because `Desc` has no `__set__` method, the instance attribute set by the dataclass's `__init__` takes precedence over the descriptor, and `dc.x` is actually the `Desc` object passed to the constructor, not an `int`.
+
+But what a type checker should do is non-obvious and not covered by the spec. Modeling the runtime exactly is one reasonable option; flagging the likely logic error in `x: Desc = Desc()` is another. (Pyrefly does the latter.) Either choice fails the test, via an `assert_type` failure or an unexpected error.
+
+In [python/typing PR #2388](https://github.com/python/typing/pull/2388), we decided to delete this example from the test. How type checkers should handle descriptors in dataclass fields is still an open question, and no test is better than one that requires incorrect behavior.
+
+### When the spec moves
+
+In the following code, should the `int` annotation in `x: int` resolve to `builtins.int` or produce an error that a method is not a type?
+
+```python
+class C:
+    x: int
+    def int(self): ...
+```
+
+The answer depends on whether this snippet is in a source (`.py`) or stub (`.pyi`) file, what the Python runtime version is, and whether `from __future__ import annotations` - which implicitly quotes annotations - is enabled. Complicating the matter, the conformance tests used to require that the quoted form resolve to `builtins.int`, which was inconsistent with the Python 3.14+ runtime. This inconsistency was fixed via a spec clarification and test change in [python/typing PR #2144](https://github.com/python/typing/pull/2144).
+
+Updating Pyrefly to conform to the new test required some care. Our initial implementation caused annotations that used to resolve successfully to produce an error and resolve to a fallback type of `Unknown`, leading to a widespread loss of type precision in downstream code. We addressed this by making Pyrefly fall back to the old type (in this example, `builtins.int`) after producing the error.
+
+## Conclusion
+
+What both of these examples highlight is that the conformance tests are not a static target. In one case, we fixed a test rather than changing Pyrefly, and in the other, the spec improved and we updated Pyrefly accordingly. That's what conforming to a living specification looks like: the spec, the conformance tests, and type checkers evolve together.
+
+But for now, Pyrefly 1.5.0 is at 100% conformance! Give it a try, and let us know how it goes on [GitHub](https://github.com/pyrefly-org/pyrefly) or [Discord](https://discord.com/invite/Cf7mFQtW7W).

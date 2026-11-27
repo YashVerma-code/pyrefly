@@ -1579,6 +1579,9 @@ pub struct Scope {
     variables: SmallMap<Name, VariableUsage>,
     /// Depth of finally blocks we're in. Resets in new function scopes (PEP 765).
     finally_depth: usize,
+    /// Depth of `try` statements we're in, counting their `except`, `else`, and `finally`
+    /// clauses. Resets in a new scope, as CPython's check for `lazy` imports does (PEP 810).
+    try_depth: usize,
     /// The first source position where relations cannot feed future cleanup or eager scopes.
     excluded_none_pairs_start: TextSize,
     /// Stack of active `with` bodies, recording whether each has encountered a live
@@ -1618,6 +1621,7 @@ impl Scope {
             has_future_annotations: false,
             variables: SmallMap::new(),
             finally_depth: 0,
+            try_depth: 0,
             excluded_none_pairs_start: TextSize::new(0),
             with_may_raise: Vec::new(),
             try_fallbacks: Vec::new(),
@@ -2069,6 +2073,21 @@ impl Scopes {
     /// Exit a finally block (PEP 765).
     pub fn exit_finally(&mut self) {
         self.current_mut().finally_depth -= 1;
+    }
+
+    /// Enter a `try` statement, including its `except`, `else`, and `finally` clauses.
+    pub fn enter_try(&mut self) {
+        self.current_mut().try_depth += 1;
+    }
+
+    /// Exit a `try` statement.
+    pub fn exit_try(&mut self) {
+        self.current_mut().try_depth -= 1;
+    }
+
+    /// Check if we're in a `try` statement at the current scope level.
+    pub fn in_try(&self) -> bool {
+        self.current().try_depth > 0
     }
 
     /// Enter the body of a `try` statement whose `except` clauses bind `fallbacks`.

@@ -193,6 +193,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             &[],
             &silent_errors,
             None,
+            true,
         )
             // Strict subtype of `int`: excludes plain `int` (no gain) and `Any`
             // (`int <: Any`, so `len(x: Any)` stays `int` rather than widening).
@@ -1134,16 +1135,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 return Some(wrapper);
             }
         }
-        let decorator = Decorator {
-            ty: callee.clone(),
-            deprecation: None,
-        };
-        let special_decorator = self.get_special_decorator(&decorator)?;
-        // Does this call have a single positional argument?
-        // If not, it cannot be a decorator application.
         if kws.is_empty()
             && let [CallArg::Arg(arg)] = args
         {
+            let decorator = Decorator {
+                ty: callee.clone(),
+                deprecation: None,
+            };
+            let special_decorator = self.get_special_decorator(&decorator)?;
+            // Class-body property inference has its own path; factories retain their nominal result.
+            if matches!(&special_decorator, SpecialDecorator::Property(_, Some(_))) {
+                return None;
+            }
             // If the decorator does not apply, the call is solved normally, which infers the
             // argument again with the parameter type as a hint. Keep these unhinted errors only if
             // this is the argument's sole inference.

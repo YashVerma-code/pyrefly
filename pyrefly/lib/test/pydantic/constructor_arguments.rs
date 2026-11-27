@@ -8,6 +8,155 @@
 use crate::pydantic_testcase;
 use crate::test::pydantic::util::pydantic_env;
 
+// Verified with Pydantic 2.14.4 on Python 3.12: an annotation-only redeclaration
+// removes an inherited value or factory default. Inheritance without redeclaration
+// keeps the default, so only the redeclaring subclasses require an explicit input.
+pydantic_testcase!(
+    test_constructor_redeclaration_removes_inherited_default,
+    r#"
+from typing import assert_type
+from pydantic import BaseModel, Field
+
+class ValueDefault(BaseModel):
+    x: int = 1
+
+class InheritedValue(ValueDefault):
+    pass
+
+class RedeclaredValue(ValueDefault):
+    x: int
+
+class FactoryDefault(BaseModel):
+    x: int = Field(default_factory=lambda: 2)
+
+class InheritedFactory(FactoryDefault):
+    pass
+
+class RedeclaredFactory(FactoryDefault):
+    x: int
+
+assert_type(ValueDefault().x, int)
+assert_type(InheritedValue().x, int)
+assert_type(FactoryDefault().x, int)
+assert_type(InheritedFactory().x, int)
+assert_type(RedeclaredValue(x=3).x, int)
+assert_type(RedeclaredFactory(x=3).x, int)
+RedeclaredValue()  # E: Missing argument `x`
+RedeclaredFactory()  # E: Missing argument `x`
+"#,
+);
+
+pydantic_testcase!(
+    test_constructor_descriptor_class_schema,
+    r#"
+from typing import Any, Generic, TypeVar
+from pydantic import BaseModel
+from pydantic_core import core_schema
+
+T = TypeVar("T")
+
+class SchemaDep(Generic[T]):
+    def __get__(self, obj: Any, owner: Any) -> T:
+        raise NotImplementedError
+
+    def __set__(self, obj: object | None, value: T) -> None: ...
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source: Any, handler: Any) -> Any:
+        return core_schema.no_info_after_validator_function(
+            lambda value: cls(), core_schema.int_schema()
+        )
+
+class InheritedSchema(SchemaDep[int]): ...
+
+class StrictModel(BaseModel, strict=True):
+    direct: SchemaDep[int]
+    inherited: InheritedSchema
+
+StrictModel(direct=1, inherited=2)
+"#,
+);
+
+// https://github.com/pyrefly-org/pyrefly/issues/5714
+pydantic_testcase!(
+    test_constructor_descriptor_field_lax,
+    r#"
+from typing import Any, Generic, TypeVar, dataclass_transform
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic._internal._model_construction import ModelMetaclass
+
+T = TypeVar("T")
+
+class Dep(Generic[T]):
+    def __get__(self, obj: Any, owner: Any) -> T:
+        raise NotImplementedError
+
+    def __set__(self, obj: object | None, value: T) -> None: ...
+
+@dataclass_transform(kw_only_default=True, field_specifiers=(Field,))
+class Meta(ModelMetaclass): ...
+
+class Base(BaseModel, metaclass=Meta):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+class Model(Base):
+    x: Dep[int]
+
+# Pydantic validates a descriptor-typed field as an instance of its declared class.
+Model(x=Dep[int]())
+Model(x=Dep[str]())
+Model(x=1)  # E: is not assignable to parameter `x` with type `Dep[Unknown]`
+
+@dataclass_transform(kw_only_default=True)
+class PlainMeta(type): ...
+
+class PlainBase(metaclass=PlainMeta): ...
+
+class PlainModel(PlainBase):
+    x: Dep[int]
+
+# Ordinary dataclass transforms retain the descriptor setter's input contract.
+PlainModel(x=1)
+PlainModel(x=Dep[int]())  # E: is not assignable to parameter `x` with type `int`
+"#,
+);
+
+pydantic_testcase!(
+    test_constructor_descriptor_field_strict,
+    r#"
+from typing import Any, Generic, TypeVar, dataclass_transform
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic._internal._model_construction import ModelMetaclass
+
+T = TypeVar("T")
+
+class Dep(Generic[T]):
+    def __get__(self, obj: Any, owner: Any) -> T:
+        raise NotImplementedError
+
+    def __set__(self, obj: object | None, value: T) -> None: ...
+
+@dataclass_transform(kw_only_default=True, field_specifiers=(Field,))
+class Meta(ModelMetaclass): ...
+
+class Base(BaseModel, metaclass=Meta):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+class StrictModel(Base, strict=True):
+    x: Dep[int]
+
+class ConfigStrictModel(Base):
+    model_config = ConfigDict(arbitrary_types_allowed=True, strict=True)
+    x: Dep[int] = Field()
+
+# Strictness does not make Pydantic validate the descriptor setter's value type.
+StrictModel(x=1)  # E: is not assignable to parameter `x` with type `Dep[int]`
+StrictModel(x=Dep[int]())
+ConfigStrictModel(x=1)  # E: is not assignable to parameter `x` with type `Dep[int]`
+ConfigStrictModel(x=Dep[int]())
+"#,
+);
+
 pydantic_testcase!(
     test_constructor_argument_literal_values,
     r#"

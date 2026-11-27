@@ -651,7 +651,7 @@ testcase!(
     r#"
 import enum
 
-class C(C, enum.Enum):  # E: Class `C` inheriting from `C` creates a cycle  # E: Cannot extend final class `C`
+class C(C, enum.Enum):  # E: Class `C` inheriting from `C` creates a cycle  # E: Cannot extend final class `C`  # E: `C` is uninitialized
     a = 1
 "#,
 );
@@ -889,7 +889,7 @@ class classproperty[_TClass, _TReturnType]:
 class Foo(IntEnum):
     X = 1
     @classproperty
-    def Y(cls) -> list[Foo]:
+    def Y(cls) -> "list[Foo]":
         return [Foo.X]
 
 # descriptors are not enum members

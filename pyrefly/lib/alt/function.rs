@@ -102,6 +102,7 @@ use crate::types::function::Function;
 use crate::types::function::FunctionKind;
 use crate::types::function::PropertyMetadata;
 use crate::types::function::PropertyRole;
+use crate::types::keywords::DataclassFieldDefault;
 use crate::types::keywords::DataclassTransformMetadata;
 use crate::types::types::CalleeKind;
 use crate::types::types::Forall;
@@ -1257,7 +1258,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         for idx in &func.decorators {
             match self.get_special_decorator(self.get_idx(*idx)) {
                 Some(SpecialDecorator::StaticMethod(_)) => child_has_receiver = false,
-                Some(SpecialDecorator::Property(_) | SpecialDecorator::CachedProperty(_)) => {
+                Some(SpecialDecorator::Property(..) | SpecialDecorator::CachedProperty(_)) => {
                     accessor = Some(PropertyRole::Getter);
                 }
                 Some(SpecialDecorator::PropertySetter(_)) => accessor = Some(PropertyRole::Setter),
@@ -1357,7 +1358,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Some(SpecialDecorator::ClassMethod(name))
             }
             Some(CalleeKind::Class(ClassKind::Property(name))) => {
-                Some(SpecialDecorator::Property(name))
+                Some(SpecialDecorator::Property(name, None))
+            }
+            Some(CalleeKind::Class(ClassKind::Class))
+                if let Some(cls) = self.property_subclass(&decorator.ty) =>
+            {
+                Some(SpecialDecorator::Property(
+                    cls.name(self).clone(),
+                    Some(cls),
+                ))
             }
             Some(CalleeKind::Class(ClassKind::CachedProperty(name))) => {
                 Some(SpecialDecorator::CachedProperty(name))
@@ -1418,12 +1427,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 flags.is_classmethod = true;
                 true
             }
-            SpecialDecorator::Property(_) => {
+            SpecialDecorator::Property(_, descriptor_class) => {
                 flags.property_metadata = Some(PropertyMetadata {
                     role: PropertyRole::Getter,
                     getter: self.heap.mk_any_error(),
                     setter: None,
                     has_deleter: false,
+                    descriptor_class: descriptor_class.clone().map(Box::new),
                 });
                 true
             }
@@ -1433,6 +1443,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     getter: self.heap.mk_any_error(),
                     setter: None,
                     has_deleter: false,
+                    descriptor_class: None,
                 });
                 flags.is_cached_property = true;
                 true
@@ -1460,6 +1471,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         getter: metadata.getter.clone(),
                         setter: metadata.setter.clone(),
                         has_deleter: metadata.has_deleter,
+                        descriptor_class: metadata.descriptor_class.clone(),
                     });
                 }
                 true
@@ -1506,49 +1518,76 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Some(default) => {
                 let display =
                     default_display_for_expr(default, self.module().code_at(default.range()));
-                let ty = match check {
-                    Some((expected_ty, tcc)) => {
-                        let mut qs = SmallSet::new();
-                        expected_ty.collect_quantifieds(&mut qs);
-                        if qs.is_empty() {
-                            self.expr_check(default, check, errors)
-                        } else {
-                            let owner = Owner::new();
-                            let upper_mp = qs
-                                .iter()
-                                .map(|q| (*q, owner.push(q.upper_bound(self, self.heap))))
-                                .collect();
-                            let upper_ty = expected_ty.clone().subst(&upper_mp);
-                            // Check if the default is compatible with the parameter type.
-                            let default_errors = self.error_collector();
-                            self.expr_check(default, Some((&upper_ty, tcc)), &default_errors);
-                            if !default_errors.has_hard() {
-                                // The default is compatible; re-infer using the original expected
-                                // type so that Quantifieds (which will be freshened on each call)
-                                // end up in the default.
-                                self.expr_infer_with_hint(
-                                    default,
-                                    Some(HintRef::soft(expected_ty)),
-                                    errors,
-                                )
-                            } else {
-                                errors.extend(default_errors);
-                                // The default is not compatible; use the parameter type to avoid
-                                // cascading errors on calls.
-                                expected_ty.clone()
-                            }
-                        }
-                    }
-                    None => self.expr_check(default, None, errors),
-                };
-                // Mark literals as explicit so we don't promote them.
-                let ty = ty.with_literal_style(LitStyle::Explicit);
+                let ty = self.infer_checked_default(default, check, errors);
                 Required::Optional(Some(match display {
                     Some(d) => DefaultValue::with_display(ty, d),
                     None => DefaultValue::new(ty),
                 }))
             }
             None => Required::Required,
+        }
+    }
+
+    /// Infer a default expression against an optional expected type.
+    ///
+    /// When the expected type contains a type variable, the default is checked
+    /// against that variable's upper bound. A compatible default is inferred again
+    /// with the original type as a hint, so the variable can appear in the result.
+    /// An incompatible default is reported and replaced with the expected type, so
+    /// later calls do not repeat the error. Literals stay explicit.
+    fn infer_checked_default(
+        &self,
+        default: &Expr,
+        check: Option<(&Type, &dyn Fn() -> TypeCheckContext)>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        let ty = match check {
+            Some((expected_ty, tcc)) => {
+                let mut qs = SmallSet::new();
+                expected_ty.collect_quantifieds(&mut qs);
+                if qs.is_empty() {
+                    self.expr_check(default, check, errors)
+                } else {
+                    let owner = Owner::new();
+                    let upper_mp = qs
+                        .iter()
+                        .map(|q| (*q, owner.push(q.upper_bound(self, self.heap))))
+                        .collect();
+                    let upper_ty = expected_ty.clone().subst(&upper_mp);
+                    let default_errors = self.error_collector();
+                    self.expr_check(default, Some((&upper_ty, tcc)), &default_errors);
+                    if !default_errors.has_hard() {
+                        self.expr_infer_with_hint(default, Some(HintRef::soft(expected_ty)), errors)
+                    } else {
+                        errors.extend(default_errors);
+                        expected_ty.clone()
+                    }
+                }
+            }
+            None => self.expr_check(default, None, errors),
+        };
+        ty.with_literal_style(LitStyle::Explicit)
+    }
+
+    /// Infer a dataclass field default the same way as a parameter default.
+    pub fn field_default_for_expr(
+        &self,
+        value: &Expr,
+        annotated: Option<&Type>,
+        errors: &ErrorCollector,
+    ) -> DataclassFieldDefault {
+        let tcc = || {
+            TypeCheckContext::of_kind(TypeCheckKind::FunctionParameterDefault(Name::new_static(
+                "default",
+            )))
+        };
+        // A default that cannot solve a type variable only needs its inferred type.
+        let check = annotated
+            .filter(|ty| ty.contains_type_variable())
+            .map(|ty| (ty, &tcc as _));
+        DataclassFieldDefault::Value {
+            ty: self.infer_checked_default(value, check, errors),
+            display: default_display_for_expr(value, self.module().code_at(value.range())),
         }
     }
 
@@ -1610,16 +1649,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     // Docstrings rarely say that a parameter defaulting to `None` is optional.
                     match &required {
-                        Required::Optional(Some(default_val)) if default_val.ty.is_none() => {
+                        Required::Optional(Some(default_val))
+                            if default_val.ty.as_ref().is_some_and(Type::is_none) =>
+                        {
                             self.union(ty, self.heap.mk_none())
                         }
                         _ => ty,
                     }
-                } else if let Required::Optional(Some(default_val)) = &required {
+                } else if let Required::Optional(Some(default_val)) = &required
+                    && let Some(default_ty) = &default_val.ty
+                {
                     self.union(
                         self.heap.mk_any_implicit(),
-                        default_val
-                            .ty
+                        default_ty
                             .clone()
                             .with_literal_style(LitStyle::Implicit)
                             .promote(self.stdlib),
@@ -1921,7 +1963,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let name = match decorator {
             SpecialDecorator::StaticMethod(name) => name.as_str(),
             SpecialDecorator::ClassMethod(name) => name.as_str(),
-            SpecialDecorator::Property(name) => name.as_str(),
+            SpecialDecorator::Property(name, _) => name.as_str(),
             SpecialDecorator::CachedProperty(name) => name.as_str(),
             SpecialDecorator::EnumMember => "member",
             SpecialDecorator::Override => "override",
@@ -2066,6 +2108,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if matches!(
                     q.identity().origin,
                     QuantifiedOrigin::Synthetic { is_self: true }
+                        | QuantifiedOrigin::UnboundMethodSelf
                 ) && let Restriction::Bound(bound) = q.restriction() =>
             {
                 Some(bound.clone())
@@ -2910,7 +2953,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Param::PosOnly(Some(name), _, Required::Optional(Some(default)))
                     | Param::Pos(name, _, Required::Optional(Some(default)))
                     | Param::KwOnly(name, _, Required::Optional(Some(default))) => {
-                        Some((name, &default.ty))
+                        default.ty.as_ref().map(|ty| (name, ty))
                     }
                     _ => None,
                 })

@@ -296,7 +296,6 @@ impl BindingsBuilder<'_> {
                 &mut comment.payload,
                 tparams_builder.as_deref_mut(),
                 true,
-                false,
                 &mut usage.as_postponed(),
                 false,
             );
@@ -447,7 +446,6 @@ impl BindingsBuilder<'_> {
                     argument,
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
-                    true,
                     usage,
                     false,
                 );
@@ -516,7 +514,6 @@ impl BindingsBuilder<'_> {
             &mut arguments.elts[1],
             tparams_builder,
             true,
-            false,
             &mut usage.as_postponed(),
             false,
         );

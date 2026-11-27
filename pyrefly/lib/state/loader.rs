@@ -22,7 +22,6 @@ use vec1::vec1;
 
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigSource;
-use crate::config::config::FallbackSearchPath;
 use crate::config::config::ImportLookupPathPart;
 use crate::error::context::ErrorContext;
 use crate::module::finder::DirEntryCache;
@@ -293,10 +292,7 @@ impl LoaderFindCache {
         // (112K files × thousands of modules) to just thousands.
         let is_origin_independent = config.source_db.is_none()
             && config.sub_configs.is_empty()
-            && !matches!(
-                config.fallback_search_path,
-                FallbackSearchPath::DirectoryRelative(_)
-            );
+            && !config.fallback_search_path.depends_on_importing_file();
         Self {
             config,
             is_origin_independent,
@@ -492,10 +488,7 @@ impl LoaderFindCache {
             .as_ref()
             .is_some_and(|source_db| !source_db.may_contain_module(module))
             && self.config.sub_configs.is_empty()
-            && !matches!(
-                self.config.fallback_search_path,
-                FallbackSearchPath::DirectoryRelative(_)
-            )
+            && !self.config.fallback_search_path.depends_on_importing_file()
     }
 
     #[allow(unused)] // will be used soon
@@ -612,8 +605,8 @@ mod tests {
         TestPath::setup_test_directory(
             root,
             vec![
-                TestPath::dir("requests", vec![TestPath::file("__init__.py")]),
-                TestPath::dir("requests-shape-stubs", vec![TestPath::file("__init__.pyi")]),
+                TestPath::dir("six", vec![TestPath::file("__init__.py")]),
+                TestPath::dir("six-shape-stubs", vec![TestPath::file("__init__.pyi")]),
             ],
         );
         let first = ModulePath::memory(root.join("first/main.py"));
@@ -634,13 +627,13 @@ mod tests {
                 let loader = LoaderFindCache::new(config.dupe());
                 for origin in origins {
                     let path = loader
-                        .find_import(ModuleName::from_str("requests"), Some(origin), None)
+                        .find_import(ModuleName::from_str("six"), Some(origin), None)
                         .finding()
                         .unwrap();
                     if compatibility {
                         assert_eq!(
                             path,
-                            ModulePath::filesystem(root.join("requests-shape-stubs/__init__.pyi"))
+                            ModulePath::filesystem(root.join("six-shape-stubs/__init__.pyi"))
                         );
                     } else {
                         assert!(path.is_bundled(), "opt-out must restore the bundled stub");

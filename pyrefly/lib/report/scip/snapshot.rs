@@ -6,7 +6,8 @@
  */
 
 //! A port of scip-python's `formatSnapshot` (`packages/pyright-scip/src/lib.ts`), so that
-//! snapshots ported from scip-python keep the same layout.
+//! snapshots ported from scip-python keep the same layout. An occurrence in test code is also
+//! marked `test`, since scip-python never sets that role.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -80,6 +81,17 @@ impl Range {
 
 fn is_definition(roles: i32) -> bool {
     roles & SymbolRole::Definition as i32 != 0
+}
+
+/// How an occurrence's roles are written: as a definition or a reference, and whether it is in
+/// test code.
+fn role_names(roles: i32) -> &'static str {
+    match (is_definition(roles), roles & SymbolRole::Test as i32 != 0) {
+        (true, false) => "definition",
+        (true, true) => "definition test",
+        (false, false) => "reference",
+        (false, true) => "reference test",
+    }
 }
 
 struct EnclosingRange<'a> {
@@ -245,11 +257,7 @@ pub fn format_snapshot(
             if range.start.character == 0 && range.end.character == 0 {
                 let definition = is_definition(occurrence.symbol_roles);
                 formatter.out.push_str("# < ");
-                formatter.out.push_str(if definition {
-                    "definition"
-                } else {
-                    "reference"
-                });
+                formatter.out.push_str(role_names(occurrence.symbol_roles));
                 formatter.out.push(' ');
                 formatter.out.push_str(&occurrence.symbol);
                 formatter.push_doc(range, &occurrence.symbol, definition, true);
@@ -287,11 +295,9 @@ pub fn format_snapshot(
                 .expect("negative length occurrence");
             formatter.out.push_str(&"^".repeat(caret_length));
             let definition = is_definition(occurrence.symbol_roles);
-            formatter.out.push_str(if definition {
-                " definition "
-            } else {
-                " reference "
-            });
+            formatter.out.push(' ');
+            formatter.out.push_str(role_names(occurrence.symbol_roles));
+            formatter.out.push(' ');
             let symbol = occurrence
                 .symbol
                 .strip_prefix(&package_prefix)

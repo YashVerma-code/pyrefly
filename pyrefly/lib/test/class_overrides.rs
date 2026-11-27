@@ -927,10 +927,10 @@ class C[T: (int, str)]:
 
     @cached_property
     @overload
-    def x(self: C[int]) -> int: ...
+    def x(self: "C[int]") -> int: ...
     @cached_property
     @overload
-    def x(self: C[str]) -> str: ...
+    def x(self: "C[str]") -> str: ...
     @cached_property
     def x(self) -> int | str:
         return self.value
@@ -1028,10 +1028,10 @@ class ReadOnly(Protocol):
 class C[T]:
     @cached_property
     @overload
-    def x(self: C[int]) -> int: ...
+    def x(self: "C[int]") -> int: ...
     @cached_property
     @overload
-    def x(self: C[str]) -> str: ...
+    def x(self: "C[str]") -> str: ...
     @cached_property
     def x(self) -> int | str:
         return 1
@@ -1213,10 +1213,10 @@ class MissingArgument(Base):
 class NoApplicableOverload[T](Base):
     @cached_property
     @overload
-    def x(self: NoApplicableOverload[int]) -> Any: ...  # E: Class member `NoApplicableOverload.x` overrides parent class `Base` in an inconsistent manner
+    def x(self: "NoApplicableOverload[int]") -> Any: ...  # E: Class member `NoApplicableOverload.x` overrides parent class `Base` in an inconsistent manner
     @cached_property
     @overload
-    def x(self: NoApplicableOverload[str]) -> Any: ...
+    def x(self: "NoApplicableOverload[str]") -> Any: ...
     @cached_property
     def x(self) -> Any:
         return None
@@ -1425,8 +1425,28 @@ class A:
 
 class B(A):
     @override
-    def __call__(self, x: str) -> None: ...  # E: Class member `B.__call__` overrides parent class `A` in an inconsistent manner
+    def __call__(self, x: str) -> None: ...  # E: Class member `B.__call__` overrides parent class `A` in an inconsistent manner; compatibility is checked because this member is decorated with `@override`
     "#,
+);
+
+testcase!(
+    test_override_dunder_call_mixed_parents,
+    r#"
+from typing import Protocol, override
+
+class Concrete:
+    def __call__(self, x: int) -> None: ...
+
+class Contract(Protocol):
+    def __call__(self, x: int) -> None: ...
+
+class Implicit(Concrete, Contract):
+    def __call__(self, x: str) -> None: ...  # E: Class member `Implicit.__call__` overrides parent class `Contract` in an inconsistent manner
+
+class Explicit(Concrete, Contract):
+    @override
+    def __call__(self, x: str) -> None: ...  # pyrefly: ignore[bad-override-explicit]  # E: Class member `Explicit.__call__` overrides parent class `Contract` in an inconsistent manner
+"#,
 );
 
 testcase!(
@@ -1574,12 +1594,12 @@ testcase!(
     r#"
 class A:
     @staticmethod
-    def f() -> A | None:
+    def f() -> "A | None":
         return A()
 
 class B(A):
     @staticmethod
-    def f() -> B:
+    def f() -> "B":
         return B()
     "#,
 );
@@ -1602,12 +1622,12 @@ testcase!(
     test_override_instance_method_with_staticmethod_2,
     r#"
 class A:
-    def f(self) -> A:
+    def f(self) -> "A":
         return A()
 
 class B(A):
     @staticmethod
-    def f() -> B:
+    def f() -> "B":
         return B()
     "#,
 );
@@ -2436,7 +2456,7 @@ class A:
         raise NotImplementedError()
 
 class B(A):
-    def aload(self):  # E: overrides parent class `A` in an inconsistent manner
+    def aload(self):  # E: is not assignable to `() -> Coroutine[Any, Any, Unknown]`, the type of `A.aload`
         return {}
     "#,
 );
@@ -2664,6 +2684,116 @@ class Child(Parent):
     def __init__(self, x: int) -> None:
         pass
     "#,
+);
+
+testcase!(
+    test_override_construction_hooks_from_object,
+    r#"
+from typing import Self, override
+
+class Implicit:
+    def __init__(self, x: int) -> None: ...
+    def __new__(cls, x: int) -> Self:
+        raise NotImplementedError
+    def __init_subclass__(cls, x: int) -> None: ...
+
+class Explicit:
+    @override
+    def __init__(self, x: int) -> None: ...  # E: Class member `Explicit.__init__` overrides parent class `object` in an inconsistent manner
+    @override
+    def __new__(cls, x: int) -> Self:  # E: Class member `Explicit.__new__` overrides parent class `object` in an inconsistent manner
+        raise NotImplementedError
+    @override
+    def __init_subclass__(cls, x: int) -> None: ...  # E: Class member `Explicit.__init_subclass__` overrides parent class `object` in an inconsistent manner
+
+class Empty: ...
+
+class InheritedObject(Empty):
+    @override
+    def __init_subclass__(cls, x: int) -> None: ...  # E: Class member `InheritedObject.__init_subclass__` overrides parent class `Empty` in an inconsistent manner; compatibility is checked because this member is decorated with `@override`
+
+class Compatible:
+    @override
+    def __init__(self) -> None: ...
+    @override
+    def __new__(cls) -> Self:
+        raise NotImplementedError
+    @override
+    def __init_subclass__(cls) -> None: ...
+"#,
+);
+
+testcase!(
+    test_override_construction_hooks_from_parent,
+    r#"
+from typing import Self, override
+
+class Parent:
+    def __init__(self, x: int) -> None: ...
+    def __new__(cls, x: int) -> Self:
+        raise NotImplementedError
+    def __init_subclass__(cls, x: int = 0) -> None: ...
+
+class Implicit(Parent):
+    def __init__(self, x: str) -> None: ...
+    def __new__(cls, x: str) -> Self:
+        raise NotImplementedError
+    def __init_subclass__(cls, x: str = "") -> None: ...
+
+class Explicit(Parent):
+    @override
+    def __init__(self, x: str) -> None: ...  # E: Class member `Explicit.__init__` overrides parent class `Parent` in an inconsistent manner
+    @override
+    def __new__(cls, x: str) -> Self:  # E: Class member `Explicit.__new__` overrides parent class `Parent` in an inconsistent manner
+        raise NotImplementedError
+    @override
+    def __init_subclass__(cls, x: str = "") -> None: ...  # E: Class member `Explicit.__init_subclass__` overrides parent class `Parent` in an inconsistent manner
+
+class Renamed(Parent):
+    @override
+    def __init__(self, y: int) -> None: ...  # E: Got parameter name `y`, expected `x`
+    @override
+    def __new__(cls, y: int) -> Self:  # E: Got parameter name `y`, expected `x`
+        raise NotImplementedError
+    @override
+    def __init_subclass__(cls, y: int = 0) -> None: ...  # E: Got parameter name `y`, expected `x`
+"#,
+);
+
+testcase!(
+    test_override_construction_hooks_suppressed,
+    r#"
+from typing import Self, final, override
+
+class Parent:
+    def __init__(self, x: int) -> None: ...
+    def __new__(cls, x: int) -> Self:
+        raise NotImplementedError
+    def __init_subclass__(cls, x: int = 0) -> None: ...
+    def ordinary(self, x: int) -> None: ...
+    @final
+    def f(self) -> None: ...
+
+class Child(Parent):
+    @override
+    def __init__(self, x: str) -> None: ...  # pyrefly: ignore[bad-override-explicit]
+    @override
+    def __new__(cls, y: int) -> Self:  # pyrefly: ignore[bad-override-explicit]
+        raise NotImplementedError
+    @override
+    def __init_subclass__(cls, x: str = "") -> None: ...  # pyrefly: ignore[bad-override-explicit]
+
+    @property
+    @override
+    def __class__(self) -> type: ...  # pyrefly: ignore[bad-override]
+
+    @override
+    def ordinary(self, x: str) -> None: ...  # E: Class member `Child.ordinary` overrides parent class `Parent` in an inconsistent manner
+    @override
+    def f(self) -> None: ...  # E: `f` is declared as final
+    @override
+    def missing(self) -> None: ...  # E: no parent class has a matching attribute
+"#,
 );
 
 testcase!(
@@ -3107,6 +3237,173 @@ class ConcreteChild(Base):
     "#,
 );
 
+// Regression coverage for https://github.com/pyrefly-org/pyrefly/issues/5299.
+testcase!(
+    test_override_descriptor_class_access,
+    TestEnv::new().enable_bad_override_descriptor_error(),
+    r#"
+from typing import Callable, Concatenate, assert_type, overload, override
+
+class Descriptor[T, **P, R]:
+    def __init__(self, fn: Callable[Concatenate[T, P], R]) -> None:
+        self.fn = fn
+
+    @overload
+    def __get__(self, instance: T, owner: type[T]) -> Callable[P, R]: ...
+    @overload
+    def __get__(self, instance: None, owner: type[T]) -> str: ...
+    def __get__(self, instance: T | None, owner: type[T]) -> Callable[P, R] | str:
+        if instance is None:
+            return "descriptor"
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            return self.fn(instance, *args, **kwargs)
+        return wrapped
+
+class Base:
+    @Descriptor
+    def method(self) -> int:
+        return 0
+
+class Child(Base):
+    @override
+    def method(self) -> int:  # E: Class access to `Child.method` is incompatible with parent class `Base`
+        return 1
+
+assert_type(Base.method, str)
+assert_type(Child().method(), int)
+
+def accepts_base(cls: type[Base]) -> str:
+    return cls.method.capitalize()
+
+accepts_base(Child)
+
+class ChildIgnored(Base):
+    @override
+    def method(self) -> int:  # pyrefly: ignore[bad-override-descriptor]
+        return 1
+"#,
+);
+
+testcase!(
+    test_override_descriptor_class_access_compatible,
+    TestEnv::new().enable_bad_override_descriptor_error(),
+    r#"
+from typing import Callable, Concatenate, assert_type, overload, override
+
+class Descriptor[T, **P, R]:
+    def __init__(self, fn: Callable[Concatenate[T, P], R]) -> None:
+        self.fn = fn
+
+    @overload
+    def __get__(self, instance: None, owner: type[T]) -> Callable[Concatenate[T, P], R]: ...
+    @overload
+    def __get__(self, instance: T, owner: type[T]) -> Callable[P, R]: ...
+    def __get__(self, instance: T | None, owner: type[T]):
+        if instance is None:
+            return self.fn
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            return self.fn(instance, *args, **kwargs)
+        return wrapped
+
+class Base:
+    def method(self, /, x: int) -> int:
+        return x
+
+class Child(Base):
+    @override
+    @Descriptor
+    def method(self, /, x: int) -> int:
+        return x
+
+class Grandchild(Child):
+    @override
+    def method(self, /, x: int) -> int:
+        return x
+
+assert_type(Child().method(1), int)
+assert_type(Child.method(Child(), 1), int)
+assert_type(Grandchild.method(Grandchild(), 1), int)
+
+class KeywordBase:
+    def method(self, x: int) -> int:
+        return x
+
+class KeywordChild(KeywordBase):
+    @override
+    @Descriptor
+    def method(self, x: int) -> int:  # E: Class access to `KeywordChild.method` is incompatible with parent class `KeywordBase`
+        return x
+
+class PlaceholderBase:
+    def method(self, /, x: int):
+        raise NotImplementedError
+
+class PlaceholderChild(PlaceholderBase):
+    @override
+    @Descriptor
+    def method(self, /, x: int) -> int:
+        return x
+"#,
+);
+
+testcase!(
+    test_override_descriptor_class_access_between_descriptors,
+    TestEnv::new().enable_bad_override_descriptor_error(),
+    r#"
+from typing import overload
+
+class Descriptor:
+    @overload
+    def __get__(self, instance: None, owner: type) -> str: ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> int: ...
+    def __get__(self, instance: object | None, owner: type) -> str | int: ...
+
+class OtherDescriptor:
+    @overload
+    def __get__(self, instance: None, owner: type) -> bytes: ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> int: ...
+    def __get__(self, instance: object | None, owner: type) -> bytes | int: ...
+
+class Base:
+    value = Descriptor()
+
+class Child(Base):
+    value = OtherDescriptor()  # E: Class access to `Child.value` is incompatible with parent class `Base`
+"#,
+);
+
+testcase!(
+    test_override_descriptor_class_access_generic_parent,
+    TestEnv::new().enable_bad_override_descriptor_error(),
+    r#"
+from typing import assert_type, overload
+
+class Descriptor[T]:
+    @overload
+    def __get__(self, instance: None, owner: type) -> T: ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> int: ...
+    def __get__(self, instance: object | None, owner: type) -> T | int: ...
+
+class Base[T]:
+    value: Descriptor[T] = Descriptor()
+
+class Child(Base[str]):
+    value = Descriptor[str]()
+
+class Grandchild(Child):
+    value = Descriptor[str]()
+
+class IncompatibleChild(Base[str]):
+    value = Descriptor[bytes]()  # E: Class access to `IncompatibleChild.value` is incompatible with parent class `Base`
+
+assert_type(Child.value, str)
+assert_type(Grandchild.value, str)
+"#,
+);
+
 testcase!(
     test_override_descriptor_method,
     r#"
@@ -3135,6 +3432,7 @@ class Derived(Base):
 
 testcase!(
     test_override_descriptor_method_incompatible,
+    TestEnv::new().enable_bad_override_descriptor_error(),
     r#"
 from typing import Callable, Self, overload
 
@@ -3155,7 +3453,8 @@ class Base:
 
 class Derived(Base):
     @decorate
-    def method(self) -> str: ...  # E: Class member `Derived.method` overrides parent class `Base` in an inconsistent manner
+    # E: Class member `Derived.method` overrides parent class `Base` in an inconsistent manner
+    def method(self) -> str: ...  # pyrefly: ignore[bad-override-descriptor]
 "#,
 );
 
@@ -3218,6 +3517,7 @@ class ChildNarrowSetter(Base):
 
 testcase!(
     test_override_descriptor_property_interop,
+    TestEnv::new().enable_bad_override_descriptor_error(),
     r#"
 class ReadWriteDescriptor:
     def __get__(self, instance: object, owner: type | None = None) -> int: ...
@@ -3233,7 +3533,7 @@ class BaseWithProp:
     def p(self, val: int) -> None: ...
 
 class ChildDesc(BaseWithProp):
-    p: ReadWriteDescriptor = ReadWriteDescriptor()
+    p: ReadWriteDescriptor = ReadWriteDescriptor()  # E: Class access to `ChildDesc.p` is incompatible with parent class `BaseWithProp`
 
 class ChildDescReadOnly(BaseWithProp):
     p: ReadOnlyDescriptor = ReadOnlyDescriptor()  # E: `ChildDescReadOnly.p` is read-only, but `BaseWithProp.p` is read-write
@@ -3243,7 +3543,7 @@ class BaseWithDesc:
 
 class ChildProp(BaseWithDesc):
     @property
-    def x(self) -> int: ...
+    def x(self) -> int: ...  # E: Class access to `ChildProp.x` is incompatible with parent class `BaseWithDesc`
     @x.setter
     def x(self, val: int) -> None: ...
 

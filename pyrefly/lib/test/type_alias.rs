@@ -1019,7 +1019,7 @@ testcase!(
 from typing import TypeVar, Generic
 class C:
     @classmethod
-    def make(cls) -> C:
+    def make(cls) -> "C":
         raise NotImplementedError()
 T = TypeVar("T", bound=C)
 class UseC(Generic[T]):
@@ -1426,7 +1426,7 @@ BadAlias6 = TypeAliasType("BadAlias6", "BadAlias7")  # E: cyclic self-reference 
 BadAlias7 = TypeAliasType("BadAlias7", BadAlias6)  # E: cyclic self-reference in `BadAlias7`
 
 # Self-reference via list
-BadAlias21 = TypeAliasType("BadAlias21", list[BadAlias21])  # E: cyclic self-reference in `BadAlias21`
+BadAlias21 = TypeAliasType("BadAlias21", list["BadAlias21"])  # E: cyclic self-reference in `BadAlias21`
 "#,
 );
 
@@ -1572,6 +1572,26 @@ class D:
     def __init__(self, c: C):
         self.x = c.y
 "#,
+);
+
+testcase!(
+    test_chained_annotated_alias_as_value,
+    r#"
+from typing import Annotated, assert_type
+
+def takes_class(cls: type[int]) -> None: ...
+
+Direct = Annotated[int, "metadata"]
+Chained = Direct
+
+Direct()  # E: Expected a callable, got `Annotated[int]`
+Chained()  # E: Expected a callable, got `Annotated[int]`
+takes_class(Direct)  # E: not assignable to parameter `cls`
+takes_class(Chained)  # E: not assignable to parameter `cls`
+
+def check_annotation(value: Chained) -> None:
+    assert_type(value, int)
+    "#,
 );
 
 testcase!(

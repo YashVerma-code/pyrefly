@@ -648,7 +648,11 @@ impl<'a> BindingsBuilder<'a> {
                 if is_unreachable {
                     BindingYield::Unreachable(y)
                 } else {
-                    BindingYield::Yield(None, y)
+                    BindingYield::Yield {
+                        annot: None,
+                        infer_send: false,
+                        expr: y,
+                    }
                 },
             );
         }
@@ -860,20 +864,12 @@ impl<'a> BindingsBuilder<'a> {
                             &mut tup.elts[0],
                             None,
                             false,
-                            false,
                             &mut type_usage,
                             false,
                         );
                         self.bind_annotated_metadata(&mut tup.elts[1..], &type_usage);
                     } else {
-                        self.ensure_type_impl(
-                            &mut *slice,
-                            None,
-                            false,
-                            false,
-                            &mut type_usage,
-                            false,
-                        );
+                        self.ensure_type_impl(&mut *slice, None, false, &mut type_usage, false);
                     }
                 } else if matches!(self.annotation_evaluation(), Evaluation::Postponed)
                     && let Expr::Name(name) = &**value
@@ -888,14 +884,7 @@ impl<'a> BindingsBuilder<'a> {
                     )
                 {
                     self.ensure_expr(&mut *value, usage);
-                    self.ensure_type_impl(
-                        &mut *slice,
-                        None,
-                        false,
-                        false,
-                        &mut usage.as_type(),
-                        false,
-                    );
+                    self.ensure_type_impl(&mut *slice, None, false, &mut usage.as_type(), false);
                 } else {
                     self.ensure_expr(&mut *value, usage);
                     self.ensure_expr(&mut *slice, usage);
@@ -1331,14 +1320,7 @@ impl<'a> BindingsBuilder<'a> {
         usage: &mut Usage,
     ) {
         let written_range = x.range();
-        self.ensure_type_impl(
-            x,
-            tparams_builder.as_deref_mut(),
-            false,
-            false,
-            usage,
-            false,
-        );
+        self.ensure_type_impl(x, tparams_builder.as_deref_mut(), false, usage, false);
         self.bind_shape_comment(x, written_range, tparams_builder, usage);
     }
 
@@ -1347,7 +1329,6 @@ impl<'a> BindingsBuilder<'a> {
         x: &mut Expr,
         mut tparams_builder: Option<&mut LegacyTParamCollector>,
         in_string_literal: bool,
-        check_runtime_name: bool,
         usage: &mut Usage,
         allow_proxy_method: bool,
     ) {
@@ -1383,12 +1364,7 @@ impl<'a> BindingsBuilder<'a> {
         match x {
             Expr::Name(x) => {
                 let name = Ast::expr_name_identifier(x.clone());
-                self.ensure_name_in_type(
-                    &name,
-                    usage,
-                    tparams_builder,
-                    check_runtime_name && !in_string_literal,
-                );
+                self.ensure_name_in_type(&name, usage, tparams_builder, true);
             }
             Expr::Subscript(ExprSubscript { value, .. })
                 if self.as_special_export(value) == Some(SpecialExport::Literal) =>
@@ -1399,14 +1375,7 @@ impl<'a> BindingsBuilder<'a> {
             Expr::Subscript(ExprSubscript { value, slice, .. })
                 if self.as_special_export(value) == Some(SpecialExport::ProxyMethod) =>
             {
-                self.ensure_type_impl(
-                    &mut *value,
-                    tparams_builder,
-                    in_string_literal,
-                    check_runtime_name,
-                    usage,
-                    true,
-                );
+                self.ensure_type_impl(&mut *value, tparams_builder, in_string_literal, usage, true);
                 self.ensure_expr(&mut *slice, &mut usage.as_static_value());
             }
             Expr::Subscript(ExprSubscript {
@@ -1425,7 +1394,6 @@ impl<'a> BindingsBuilder<'a> {
                     &mut *value,
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
-                    check_runtime_name,
                     usage,
                     allow_proxy_method,
                 );
@@ -1435,7 +1403,6 @@ impl<'a> BindingsBuilder<'a> {
                     &mut tup.elts[0],
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
-                    check_runtime_name,
                     &mut type_usage,
                     allow_proxy_method,
                 );
@@ -1452,7 +1419,6 @@ impl<'a> BindingsBuilder<'a> {
                     &mut *value,
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
-                    true,
                     usage,
                     allow_proxy_method,
                 );
@@ -1468,7 +1434,6 @@ impl<'a> BindingsBuilder<'a> {
                     &mut *value,
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
-                    true,
                     usage,
                     allow_proxy_method,
                 );
@@ -1476,7 +1441,6 @@ impl<'a> BindingsBuilder<'a> {
                     &mut *slice,
                     tparams_builder,
                     in_string_literal,
-                    true,
                     &mut type_usage,
                     allow_proxy_method,
                 );
@@ -1498,7 +1462,6 @@ impl<'a> BindingsBuilder<'a> {
                             x,
                             tparams_builder,
                             true,
-                            check_runtime_name,
                             &mut usage.as_postponed(),
                             allow_proxy_method,
                         );
@@ -1596,7 +1559,6 @@ impl<'a> BindingsBuilder<'a> {
                     left,
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
-                    check_runtime_name,
                     usage,
                     allow_proxy_method,
                 );
@@ -1604,7 +1566,6 @@ impl<'a> BindingsBuilder<'a> {
                     right,
                     tparams_builder,
                     in_string_literal,
-                    check_runtime_name,
                     usage,
                     allow_proxy_method,
                 );
@@ -1633,7 +1594,6 @@ impl<'a> BindingsBuilder<'a> {
                     x,
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
-                    check_runtime_name,
                     usage,
                     allow_proxy_method,
                 )
