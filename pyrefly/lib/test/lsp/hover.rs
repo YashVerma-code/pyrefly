@@ -2755,6 +2755,72 @@ fn get_test_report_with_closed_library(lib: &str, main: &str) -> String {
 }
 
 #[test]
+fn hover_on_overloaded_function_in_closed_stub() {
+    let stub = r#"
+from typing import overload
+
+@overload
+def convert(value: int) -> int:
+    """Integer overload documentation."""
+
+@overload
+def convert(value: str) -> str:
+    """String overload documentation."""
+
+@overload
+def convert(value: bytes) -> bytes: ...
+"#;
+    let source = r#"
+def convert(value: int | str | bytes) -> int | str | bytes:
+    """Implementation documentation."""
+    return value
+"#;
+    let main = r#"
+from lib import convert
+
+_ = convert("")
+#    ^
+_ = convert(b"")
+#    ^
+"#;
+    for with_source in [false, true] {
+        let mut env = TestEnv::new().with_run_require(Require::Exports);
+        if with_source {
+            env.add_with_path("lib", "lib.py", source);
+        }
+        env.add_with_path("lib", "lib.pyi", stub);
+        env.add("main", main);
+        let (state, handles) = env.to_state();
+        let main_handle = handles("main");
+        let mut transaction = state.transaction();
+        transaction.run(slice::from_ref(&main_handle), Require::Everything, None);
+        assert!(transaction.get_ast(&handles("lib")).is_none());
+
+        let cursors = extract_cursors_for_test(main);
+        let hover_doc = |position| {
+            let hover = get_hover(&transaction, &main_handle, position, false).unwrap();
+            let Contents::MarkupContent(markup) = hover.contents else {
+                panic!("expected Markdown hover");
+            };
+            markup
+                .value
+                .split_once("\n---\n")
+                .map(|(_, doc)| doc.trim().to_owned())
+        };
+        assert_eq!(
+            hover_doc(cursors[0]).as_deref(),
+            Some("String overload documentation."),
+        );
+        // BUG: The undocumented bytes overload borrows the first overload's documentation.
+        assert_eq!(
+            hover_doc(cursors[1]).as_deref(),
+            Some("Integer overload documentation."),
+        );
+        assert!(transaction.get_ast(&handles("lib")).is_none());
+    }
+}
+
+#[test]
 fn hover_on_property_returning_class_in_closed_library() {
     let lib = r#"
 class Target:
