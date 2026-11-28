@@ -5,7 +5,13 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use ruff_text_size::Ranged;
+use ruff_text_size::TextRange;
+use ruff_text_size::TextSize;
+
 use crate::test::util::TestEnv;
+use crate::test::util::init_test;
+use crate::test::util::mk_state;
 use crate::testcase;
 
 testcase!(
@@ -3028,6 +3034,96 @@ unknown: Dog | Cat = {"kind": "bird", "lives": 1}  # E: Invalid tag `"bird"` for
 bad_field: Cat | Dog = {"kind": "cat", "lives": "many"}  # E: is not assignable to # !E: Invalid tag
 optional: Cat | Fish = {"kind": "bird", "lives": 1}  # E: is not assignable to # !E: Invalid tag
 mixed: Cat | Dog | int = {"kind": "bird", "lives": 1}  # E: is not assignable to # !E: Invalid tag
+"#,
+);
+
+#[test]
+fn test_invalid_typed_dict_union_tag_diagnostic_contract() {
+    init_test();
+    let code = r#"
+from typing import Literal, TypedDict
+class Cat(TypedDict):
+    kind: Literal["cat"]
+class Dog(TypedDict):
+    kind: Literal["dog"]
+
+pet: Cat | Dog = {"kind": "bird"}
+def consume(pet: Cat | Dog) -> None: ...
+consume({"kind": "bird"})
+def produce() -> Cat | Dog:
+    return {"kind": "bird"}
+def default(pet: Cat | Dog = {"kind": "bird"}) -> None: ...
+"#;
+    let (handle, state) = mk_state(code);
+    let mut errors = state
+        .transaction()
+        .get_errors([&handle])
+        .collect_display_errors();
+    errors.sort_by_key(|error| error.range().start());
+    assert_eq!(errors.len(), 4);
+    for (error, kind) in errors.iter().zip([
+        "bad-assignment",
+        "bad-argument-type",
+        "bad-return",
+        "bad-function-definition",
+    ]) {
+        assert_eq!(error.error_kind().to_name(), kind);
+        let primary = error.range();
+        assert_eq!(
+            &code[usize::from(primary.start())..usize::from(primary.end())],
+            r#"{"kind": "bird"}"#,
+        );
+        let annotations = error
+            .secondary_annotations()
+            .iter()
+            .filter(|annotation| annotation.label.as_ref() == "invalid tag")
+            .collect::<Vec<_>>();
+        assert_eq!(annotations.len(), 1);
+        let value_start = usize::from(primary.start()) + r#"{"kind": "#.len();
+        assert_eq!(
+            annotations[0].range,
+            TextRange::at(TextSize::try_from(value_start).unwrap(), TextSize::new(6)),
+        );
+        assert!(error.msg().contains(
+            r#"Invalid tag `"bird"` for key `"kind"`; expected one of `"cat"`, `"dog"`"#
+        ));
+        assert!(error.to_diagnostic().unwrap().related_information.is_none());
+    }
+}
+
+testcase!(
+    test_invalid_typed_dict_union_tag_syntax_boundaries,
+    r#"
+from typing import Literal, TypedDict
+
+class Cat(TypedDict):
+    kind: Literal["cat"]
+class Dog(TypedDict):
+    kind: Literal["dog"]
+class OtherCat(TypedDict):
+    kind: Literal["cat"]
+class Cats(TypedDict):
+    kind: Literal["cat", "kitten"]
+class One(TypedDict):
+    kind: Literal[1]
+class Two(TypedDict):
+    kind: Literal[2]
+
+unpacked: Cat | Dog = {**{"kind": "bird"}}  # E: is not assignable # !E: Invalid tag
+empty_unpack: Cat | Dog = {"kind": "bird", **{}}  # E: is not assignable # !E: Invalid tag
+duplicate: Cat | Dog = {"kind": "cat", "kind": "bird"}  # E: is not assignable # !E: Invalid tag
+same: Cat | OtherCat = {"kind": "bird"}  # E: is not assignable # !E: Invalid tag
+many: Cats | Dog = {"kind": "bird"}  # E: is not assignable # !E: Invalid tag
+integer: One | Two = {"kind": 3}  # E: is not assignable # !E: Invalid tag
+missing: Cat | Dog = {}  # E: is not assignable # !E: Invalid tag
+nested: dict[str, Cat | Dog] = {"pet": {"kind": "bird"}}  # E: is not assignable # !E: Invalid tag
+pets: list[Cat | Dog] = [{"kind": "bird"}]  # E: is not assignable # !E: Invalid tag
+
+def dynamic_key(key: str) -> None:
+    pet: Cat | Dog = {"kind": "bird", key: 1}  # E: is not assignable # !E: Invalid tag
+
+def dynamic_value(value: Literal["bird"]) -> None:
+    pet: Cat | Dog = {"kind": value}  # E: is not assignable # !E: Invalid tag
 "#,
 );
 
