@@ -616,7 +616,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .as_ref()
                 .filter(|tparams| !tparams.is_empty())
                 .cloned();
-            OverloadTrace::new(target.1.signature.clone(), tparams, receiver)
+            OverloadTrace::new(
+                target.1.signature.clone(),
+                tparams,
+                receiver,
+                target.1.metadata.kind.func_def_id_arc(),
+            )
         };
         let all_overload_traces = overloads.iter().map(overload_trace).collect();
         self.record_overload_trace(range, all_overload_traces, overload_trace(closest), chosen);
