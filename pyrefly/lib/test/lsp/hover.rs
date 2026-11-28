@@ -2811,11 +2811,8 @@ _ = convert(b"")
             hover_doc(cursors[0]).as_deref(),
             Some("String overload documentation."),
         );
-        // BUG: The undocumented bytes overload borrows the first overload's documentation.
-        assert_eq!(
-            hover_doc(cursors[1]).as_deref(),
-            Some("Integer overload documentation."),
-        );
+        let expected = with_source.then_some("Implementation documentation.");
+        assert_eq!(hover_doc(cursors[1]).as_deref(), expected);
         assert!(transaction.get_ast(&handles("lib")).is_none());
     }
 }

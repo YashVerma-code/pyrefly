@@ -240,20 +240,26 @@ pub enum OverloadedCallee {
 }
 
 impl OverloadedCallee {
-    fn chosen_type(&self) -> Option<Type> {
+    fn chosen_signature(&self) -> Option<&OverloadTrace> {
         match self {
-            Self::Resolved { callable } => Some(callable.as_type()),
-            Self::Candidates {
-                closest,
+            Self::Resolved { callable }
+            | Self::Candidates {
+                closest: callable,
                 is_closest_chosen: true,
                 ..
-            } => Some(closest.as_type()),
-            Self::Candidates { .. } => None,
+            } => Some(callable),
+            Self::Candidates { .. } | Self::Alternatives(_) => None,
+        }
+    }
+
+    fn chosen_type(&self) -> Option<Type> {
+        match self {
             Self::Alternatives(alternatives) => alternatives
                 .iter()
                 .map(Self::chosen_type)
                 .collect::<Option<Vec<_>>>()
                 .map(Type::union),
+            _ => self.chosen_signature().map(OverloadTrace::as_type),
         }
     }
 
@@ -2024,17 +2030,21 @@ impl Answers {
         lock.overloaded_callees.get(&range)?.chosen_type()
     }
 
-    /// The source definition chosen for a successfully resolved overload call.
-    pub fn get_chosen_overload_func_def_id(&self, range: TextRange) -> Option<Arc<FuncDefId>> {
+    /// The selected declaration and all source declarations in its overload set.
+    pub(crate) fn get_chosen_overload_definitions(
+        &self,
+        range: TextRange,
+    ) -> Option<(Arc<FuncDefId>, Vec<Arc<FuncDefId>>)> {
         let lock = self.trace.as_ref()?.lock();
-        match lock.overloaded_callees.get(&range)? {
-            OverloadedCallee::Candidates {
-                closest,
-                is_closest_chosen: true,
-                ..
-            } => closest.func_def_id.clone(),
-            _ => None,
-        }
+        let trace = lock.overloaded_callees.get(&range)?;
+        let selected = trace.chosen_signature()?.func_def_id.clone()?;
+        let OverloadedCallee::Candidates { all, .. } = trace else {
+            return None;
+        };
+        Some((
+            selected,
+            all.iter().filter_map(|x| x.func_def_id.clone()).collect(),
+        ))
     }
 
     /// Returns all the overload, and the index of a chosen one
